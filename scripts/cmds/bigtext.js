@@ -1,6 +1,6 @@
 module.exports = {
 	config: {
-		name: "bigtxt",
+		name: "bigtext",
 		version: "1.0",
 		author: "Samir", // Time to wait before executing command again (seconds)
 		role: 0,
