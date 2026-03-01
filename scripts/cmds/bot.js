@@ -3,8 +3,8 @@ const axios = require("axios");
 module.exports = {
   config: {
     name: "bot",
-    version: "2.9",
-    author: "Nazrul | Fixed By LIKHON AHMED",
+    version: "3.4",
+    author: "LIKHON AHMED",
     countDown: 5,
     role: 0,
     description: "chat with bot using API + random replies + mention",
@@ -24,18 +24,23 @@ module.exports = {
     }
 
     try {
-      const url = `http://65.109.80.126:20392/sim?type=ask&ask=${encodeURIComponent(userMsg)}`;
-      const res = await axios.get(url);
-      const replyText = res.data?.data?.msg || "🥲 আমি কিছু বুঝতে পারলাম না।";
+      let apiUrl;
+      try {
+        const apiData = await axios.get('https://raw.githubusercontent.com/MOHAMMAD-NAYAN-07/Nayan/main/api.json');
+        apiUrl = apiData.data.sim;
+      } catch (jsonError) {
+        apiUrl = "http://65.109.80.126:20392";
+      }
 
-      return api.sendMessage(
-        {
-          body: `‎╭────────────❍\n╰➤ 👤 𝐃𝐞𝐚𝐫『 ${name} 』,\n╰➤ 🗣 ${replyText}\n╰─────────────────➤`,
-          mentions: [{ tag: name, id: event.senderID }]
-        },
-        event.threadID,
-        event.messageID
-      );
+      const response = await axios.get(`${apiUrl}/sim?type=ask&ask=${encodeURIComponent(userMsg)}`);
+      const replyText = response.data.data.msg;
+
+      const msg = await api.sendMessage({
+        body: `╭────────────❍\n╰➤ 👤 𝐃𝐞𝐚𝐫『 ${name} 』,\n╰➤ 🗣 ${replyText}\n╰─────────────────➤`,
+        mentions: [{ tag: name, id: event.senderID }]
+      }, event.threadID);
+
+      return msg;
     } catch (err) {
       return api.sendMessage("⚠ API error: " + err.message, event.threadID);
     }
@@ -45,13 +50,11 @@ module.exports = {
     const text = event.body?.trim();
     if (!text) return;
     if (event.senderID === api.getCurrentUserID()) return;
-
-  
     if (text.startsWith("/")) return;
 
-    
     const firstWord = text.split(" ")[0];
     const callWords = ["bot", "Bot", "বট"];
+    
     if (callWords.includes(firstWord)) {
       const data = await usersData.get(event.senderID);
       const name = data?.name || "Friend";
@@ -83,39 +86,42 @@ module.exports = {
       ];
 
       const randomMessage = randomMessages[Math.floor(Math.random() * randomMessages.length)];
-      return api.sendMessage(
-        {
-          body: `‎╭────────────❍\n╰➤ 👤 𝐃𝐞𝐚𝐫『 ${name} 』,\n╰➤ 🗣 ${randomMessage}\n╰─────────────────➤`,
-          mentions: [{ tag: name, id: event.senderID }]
-        },
-        event.threadID,
-        event.messageID
-      );
+      
+      const msg = await api.sendMessage({
+        body: `╭────────────❍\n╰➤ 👤 𝐃𝐞𝐚𝐫『 ${name} 』,\n╰➤ 🗣 ${randomMessage}\n╰─────────────────➤`,
+        mentions: [{ tag: name, id: event.senderID }]
+      }, event.threadID);
+
+      return msg;
     }
 
-    
-    if (
-      event.type === "message_reply" &&
-      event.messageReply?.senderID === api.getCurrentUserID() &&
-      event.messageReply?.body?.includes("𝐃𝐞𝐚𝐫") &&
-      event.messageReply?.body?.includes("🗣")
-    ) {
+    const isReplyToBot = event.type === "message_reply" && 
+                         event.messageReply && 
+                         event.messageReply.senderID === api.getCurrentUserID() &&
+                         event.senderID !== api.getCurrentUserID();
+
+    if (isReplyToBot) {
       try {
         const data = await usersData.get(event.senderID);
         const name = data?.name || "Friend";
 
-        const url = `http://65.109.80.126:20392/sim?type=ask&ask=${encodeURIComponent(text)}`;
-        const res = await axios.get(url);
-        const replyText = res.data?.data?.msg || "🥲 আমি কিছু বুঝতে পারলাম না।";
+        let apiUrl;
+        try {
+          const apiData = await axios.get('https://raw.githubusercontent.com/MOHAMMAD-NAYAN-07/Nayan/main/api.json');
+          apiUrl = apiData.data.sim;
+        } catch (jsonError) {
+          apiUrl = "http://65.109.80.126:20392";
+        }
 
-        return api.sendMessage(
-          {
-            body: `‎╭────────────❍\n╰➤ 👤 𝐃𝐞𝐚𝐫『 ${name} 』,\n╰➤ 🗣 ${replyText}\n╰─────────────────➤`,
-            mentions: [{ tag: name, id: event.senderID }]
-          },
-          event.threadID,
-          event.messageID
-        );
+        const response = await axios.get(`${apiUrl}/sim?type=ask&ask=${encodeURIComponent(text)}`);
+        const replyText = response.data.data.msg;
+
+        const msg = await api.sendMessage({
+          body: `╭────────────❍\n╰➤ 👤 𝐃𝐞𝐚𝐫『 ${name} 』,\n╰➤ 🗣 ${replyText}\n╰─────────────────➤`,
+          mentions: [{ tag: name, id: event.senderID }]
+        }, event.threadID, event.messageReply.messageID);
+
+        return msg;
       } catch (err) {
         return api.sendMessage("⚠ API error: " + err.message, event.threadID);
       }
