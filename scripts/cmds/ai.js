@@ -1,83 +1,95 @@
-const axios = require("axios");
+module.exports = {
+    config: {
+        name: "ai",
+        version: "1.1",
+        author: "LIKHON AHMED",
+        countDown: 3,
+        role: 0,
+        shortDescription: {
+            vi: "Trò chuyện với AI",
+            en: "Chat with AI"
+        },
+        description: {
+            vi: "Trò chuyện với AI thông qua API Nayan",
+            en: "Chat with AI using Nayan API"
+        },
+        category: "ai",
+        guide: {
+            vi: "dùng /ai [câu hỏi] hoặc reply tin nhắn của bot",
+            en: "use /ai [question] or reply to bot's message"
+        }
+    },
 
-module.exports.config = {
-  name: "ai",
-  version: "1.0.1",
-  permission: 0,
-  credits: "IMRAN (fixed)",
-  description: "Chat with a GPT-4.1 AI bot (with reply support)",
-  prefix: false,
-  category: "chatgpt",
-  usages: "ai [your message]",
-  cooldowns: 5
+    langs: {
+        vi: {
+            thinking: "🤔 Đang suy nghĩ...",
+            error: "❌ Đã xảy ra lỗi, vui lòng thử lại sau",
+            reply: "💬 Trả lời tin nhắn của tôi để hỏi tiếp nhé!"
+        },
+        en: {
+            thinking: "🤔 Thinking...",
+            error: "❌ An error occurred, please try again later",
+            reply: "💬 Reply to my message to ask more!"
+        }
+    },
+
+    onStart: async function ({ api, args, message, event, getLang }) {
+        const question = args.join(" ");
+        
+        if (!question) {
+            return message.reply(getLang("reply"));
+        }
+
+        await handleAIResponse(message, question, getLang, event);
+    },
+
+    onReply: async function ({ api, args, message, event, getLang, Reply }) {
+        const question = args.join(" ");
+        
+        if (!question) {
+            return message.reply(getLang("reply"));
+        }
+
+        const replyMessageID = event.messageReply.messageID;
+        await handleAIResponse(message, question, getLang, event, replyMessageID);
+    }
 };
 
-const cuteReplies = [
-  "Hey there! 👋 How can I brighten your day?",
-  "Hello! Let me know how I can help you today.",
-  "Hi! I’m here if you need anything!",
-  "What’s up? How can I assist you today?",
-  "Hey hey! Need help with something?",
-  "Yo! Let’s get started!",
-  "Welcome aboard! 😊 Ready when you are.",
-  "Glad you're here! Tell me how I can make things easier.",
-  "Hi there! Whether fun or help — I’m just one message away.",
-  "Nice to see you here! Let’s do something awesome together."
-];
+async function handleAIResponse(message, question, getLang, event, replyToMessageID = null) {
+    try {
+        const encodedQuestion = encodeURIComponent(question);
+        const response = await fetch(`https://nayan-ai-online.vercel.app/nayan/pai?number=0&question=${encodedQuestion}`);
+        
+        if (!response.ok) {
+            throw new Error(`API responded with status: ${response.status}`);
+        }
 
-const replyMap = new Map();
+        const data = await response.json();
+        
+        if (data.answer) {
+            const answer = data.answer;
+            
+            await message.reply({
+                body: answer,
+                mentions: [{
+                    tag: event.senderID,
+                    id: event.senderID
+                }]
+            }, (err, info) => {
+                if (err) return console.error(err);
+                
+                global.GoatBot.onReply.set(info.messageID, {
+                    commandName: module.exports.config.name,
+                    author: event.senderID,
+                    messageID: info.messageID
+                });
+            });
+        } else {
+            throw new Error("No answer in response");
+        }
 
-module.exports.onStart = async function ({ api, event, args }) {
-  const { threadID, messageID, senderID } = event;
-  const query = args.join(" ");
-
-  if (!query) {
-    const reply = cuteReplies[Math.floor(Math.random() * cuteReplies.length)];
-    return api.sendMessage(reply, threadID, (err, info) => {
-      if (!err) {
-        if (!replyMap.has(threadID)) replyMap.set(threadID, []);
-        replyMap.get(threadID).push({ messageID: info.messageID, author: senderID });
-      }
-    }, messageID);
-  }
-
-  try {
-    const apiUrl = `https://kaiz-apis.gleeze.com/api/kaiz-ai?ask=${encodeURIComponent(query)}&uid=${senderID}&apikey=6c9542b5-7070-48cb-b325-80e1ba65a451`;
-    const response = await axios.get(apiUrl);
-    const botReply = response.data?.response || "Hmm, I didn’t catch that. Try asking something else!";
-
-    api.sendMessage(botReply, threadID, (err, info) => {
-      if (!err) {
-        if (!replyMap.has(threadID)) replyMap.set(threadID, []);
-        replyMap.get(threadID).push({ messageID: info.messageID, author: senderID });
-      }
-    }, messageID);
-  } catch (e) {
-    console.error("GPT API Error:", e.message);
-    api.sendMessage("❌ Something went wrong while contacting GPT service.", threadID, messageID);
-  }
-};
-
-module.exports.handleEvent = async function ({ api, event }) {
-  const { threadID, messageID, senderID, body, messageReply } = event;
-
-  if (!messageReply?.messageID || !replyMap.has(threadID)) return;
-
-  const replies = replyMap.get(threadID);
-  const found = replies.find(item => item.messageID === messageReply.messageID && item.author === senderID);
-
-  if (!found || !body) return;
-
-  try {
-    const apiUrl = `https://kaiz-apis.gleeze.com/api/gpt-4.1?ask=${encodeURIComponent(body)}&uid=${senderID}&apikey=6c9542b5-7070-48cb-b325-80e1ba65a451`;
-    const response = await axios.get(apiUrl);
-    const botReply = response.data?.response || "Sorry, I didn’t quite get that. Try again!";
-
-    api.sendMessage(botReply, threadID, (err, info) => {
-      if (!err) replies.push({ messageID: info.messageID, author: senderID });
-    }, messageID);
-  } catch (e) {
-    console.error("GPT API Error:", e.message);
-    api.sendMessage("❌ Error contacting GPT service.", threadID, messageID);
-  }
-};
+    } catch (error) {
+        console.error("AI Command Error:", error);
+        message.reply(getLang("error"));
+    }
+}
