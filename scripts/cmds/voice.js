@@ -44,7 +44,7 @@ module.exports = {
 
 		if (option === "list") {
 			try {
-				const res = await axios.get("https://noobs-voice-api.vercel.app/list");
+				const res = await axios.get("https://himu-voice-api.vercel.app/list");
 				const data = res.data;
 
 				let voices = [];
@@ -60,7 +60,7 @@ module.exports = {
 			}
 		} else {
 			const voiceName = args[0];
-			const url = `https://noobs-voice-api.vercel.app/voice/${voiceName}`;
+			const url = `https://himu-voice-api.vercel.app/voice/${voiceName}`;
 			try {
 				return api.sendMessage({attachment: await global.utils.getStreamFromURL(url)}, event.threadID);
 			} catch {
