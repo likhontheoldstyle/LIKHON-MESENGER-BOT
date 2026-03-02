@@ -5,81 +5,107 @@ const path = require('path');
 module.exports = {
   config: {
     name: "pastebin",
-    version: "1.3",
+    version: "1.4",
     aliases: ["p-bin", "bin"],
-    author: "SANDIP + Arijit",
+    author: "LIKHON AHMED",
     countDown: 5,
-    role: 2,
-    shortDescription: { en: "Upload files to Pastebin (Owner only)" },
-    longDescription: { en: "Only Arijit (bot owner) can upload files to Pastebin and get a shareable link." },
+    role: 0,
+    shortDescription: {
+      en: "Upload files to Pastebin"
+    },
+    longDescription: {
+      en: "Upload files from cmds folder to Pastebin and get shareable link"
+    },
     category: "owner",
-    guide: { en: "Use: !pastebin <filename>\nExample: !pastebin mycmd.js\nFile must be in 'cmds' folder." }
+    guide: {
+      en: "Use: {p}pastebin <filename>\nExample: {p}pastebin mycmd"
+    }
   },
 
-  onStart: async function ({ api, event, args }) {
-    const ownerID = "61572240295227";
+  langs: {
+    en: {
+      ownerOnly: "❌ This command is only for bot owners!",
+      noFile: "❌ Please provide a filename.\nExample: {p}pastebin mycmd",
+      fileNotFound: "❌ File '%1.js' not found in cmds folder.",
+      uploadSuccess: "✅ File uploaded successfully!\n\n📁 Filename: %1.js\n🔗 Link: %2\n📦 Size: %3 KB",
+      uploadError: "❌ Error uploading file: %1",
+      processing: "⏳ Uploading file to Pastebin..."
+    }
+  },
 
-    // ❌ Owner check
-    if (event.senderID !== ownerID) {
-      return api.sendMessage(
-        "❌ ওহো! এই কমান্ডটা শুধু আমার মালিকের জন্য 💖",
-        event.threadID,
-        event.messageID
-      );
+  onStart: async function ({ api, event, args, getLang }) {
+    const ownerID = ["61572915213085", "YOUR_OWNER_ID_HERE"];
+    
+    if (!ownerID.includes(event.senderID)) {
+      return api.sendMessage(getLang("ownerOnly"), event.threadID, event.messageID);
     }
 
-    // ❌ No filename
     if (!args[0]) {
-      return api.sendMessage(
-        "❌ ওহ! প্রথমে আমাকে ফাইলের নাম তো দাও 😹",
-        event.threadID,
-        event.messageID
-      );
+      return api.sendMessage(getLang("noFile"), event.threadID, event.messageID);
     }
 
-    const pastebin = new PastebinAPI({
-      api_dev_key: 'LFhKGk5aRuRBII5zKZbbEpQjZzboWDp9'
-    });
-
-    const fileName = args[0].replace(/\.js$/, ""); 
-    const filePath = path.join(__dirname, '..', 'cmds', fileName + '.js');
-
-    // ❌ File not found
-    if (!fs.existsSync(filePath)) {
-      return api.sendMessage(
-        `❌ হায়! '${fileName}.js' নামে কোনো ফাইল cmds ফোল্ডারে খুঁজে পাচ্ছি না 😿`,
-        event.threadID,
-        event.messageID
-      );
-    }
+    const processingMsg = await api.sendMessage(getLang("processing"), event.threadID);
 
     try {
-      const data = fs.readFileSync(filePath, 'utf8');
-
-      const pasteUrl = await pastebin.createPaste({
-        text: data,
-        title: fileName,
-        format: "text",
-        privacy: 1 // unlisted
+      const pastebin = new PastebinAPI({
+        api_dev_key: 'LFhKGk5aRuRBII5zKZbbEpQjZzboWDp9'
       });
 
-      // Create raw link
-      const pasteID = pasteUrl.split("/").pop();
-      const rawUrl = `https://pastebin.com/raw/${pasteID}`;
+      const fileName = args[0].replace(/\.js$/g, "");
+      
+      const possiblePaths = [
+        path.join(__dirname, '..', 'cmds', fileName + '.js'),
+        path.join(__dirname, '..', 'commands', fileName + '.js'),
+        path.join(__dirname, '..', 'scripts', 'cmds', fileName + '.js'),
+        path.join(process.cwd(), 'cmds', fileName + '.js'),
+        path.join(process.cwd(), 'commands', fileName + '.js')
+      ];
 
-      // ✅ Success message - এখন dynamic fileName আসবে
-      const message = `✨ 𝗬𝗔𝗬! ফাইল আপলোড সম্পন্ন হয়েছে ✨
-🎶 Filename: "${fileName}.js"
-🔗 Link: ${rawUrl}`;
+      let filePath = null;
+      for (const testPath of possiblePaths) {
+        if (fs.existsSync(testPath)) {
+          filePath = testPath;
+          break;
+        }
+      }
 
-      api.sendMessage(message, event.threadID, event.messageID);
-    } catch (err) {
-      console.error(err);
-      api.sendMessage(
-        "❌ অয় অয়… ফাইল আপলোড করতে গিয়ে সমস্যা হয়ে গেছে 😢",
-        event.threadID,
-        event.messageID
-      );
+      if (!filePath) {
+        await api.unsendMessage(processingMsg.messageID);
+        return api.sendMessage(getLang("fileNotFound", fileName), event.threadID, event.messageID);
+      }
+
+      const stats = fs.statSync(filePath);
+      const fileSizeInKB = (stats.size / 1024).toFixed(2);
+
+      const data = fs.readFileSync(filePath, 'utf8');
+
+      const paste = await pastebin.createPaste({
+        text: data,
+        title: fileName + '.js',
+        format: 'javascript',
+        privacy: 1
+      });
+
+      const rawUrl = paste.replace(/^https?:\/\/pastebin\.com\//, 'https://pastebin.com/raw/');
+
+      await api.unsendMessage(processingMsg.messageID);
+
+      const successMessage = getLang("uploadSuccess", fileName, rawUrl, fileSizeInKB);
+      
+      api.sendMessage(successMessage, event.threadID, event.messageID);
+
+    } catch (error) {
+      console.error("Pastebin Error:", error);
+      await api.unsendMessage(processingMsg.messageID);
+      
+      let errorMessage = error.message;
+      if (error.message.includes("Invalid api_dev_key")) {
+        errorMessage = "Invalid Pastebin API key. Please check your API key.";
+      } else if (error.message.includes("Connection refused")) {
+        errorMessage = "Network error. Please try again later.";
+      }
+      
+      api.sendMessage(getLang("uploadError", errorMessage), event.threadID, event.messageID);
     }
   }
 };
