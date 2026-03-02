@@ -23,7 +23,7 @@ module.exports = {
         tag: ' 𝐌𝐈𝐒𝐒𝐈𝐍𝐆 𝐃𝐄𝐀𝐑 🫠🎀'
       };
 
-      const imageURL = 'https://drive.google.com/uc?export=view&id=1RnxK_WWPWa913H8vr4yl3Glxyh0kUcsk';
+      const imageURL = 'https://files.catbox.moe/35alc4';
       const tempPath = path.join(__dirname, 'tmp');
       if (!fs.existsSync(tempPath)) fs.mkdirSync(tempPath);
 
