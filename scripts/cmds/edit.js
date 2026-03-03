@@ -2,83 +2,84 @@ const axios = require("axios");
 const fs = require("fs-extra");
 const path = require("path");
 
+const apiUrl = "https://raw.githubusercontent.com/Saim-x69x/sakura/main/ApiUrl.json";
+
+async function getApiUrl() {
+  const res = await axios.get(apiUrl);
+  return res.data.apiv3;
+}
+
+async function urlToBase64(url) {
+  const res = await axios.get(url, { responseType: "arraybuffer" });
+  return Buffer.from(res.data).toString("base64");
+}
+
 module.exports = {
   config: {
     name: "edit",
-    version: "1.1.0",
-    author: "IMRAN -> MODIFIED BY LIKHON AHMED",
-    cooldowns: 5,
-    role: 0, // everyone can use
-    category: "image",
-    description: "AI image editing using prompt + image or attachment",
-    usages: "edit [prompt] + reply image or link",
-    dependencies: { axios: "" }
+    version: "1.0",
+    author: "LIKHON AHMED",
+    countDown: 5,
+    role: 0,
+    shortDescription: "Edit an image using text prompt",
+    longDescription: "Only edits an existing image. Must reply to an image.",
+    guide: "{p}edit <prompt> (reply to an image)"
   },
 
   onStart: async function ({ api, event, args, message }) {
+    const repliedImage = event.messageReply?.attachments?.[0];
+    const prompt = args.join(" ").trim();
+
+    if (!repliedImage || repliedImage.type !== "photo") {
+      return message.reply(
+        "❌ Please reply to an image to edit it.\n\nExample:\n/edit make it anime style"
+      );
+    }
+
+    if (!prompt) {
+      return message.reply("❌ Please provide an edit prompt.");
+    }
+
+    const processingMsg = await message.reply("🖌 Editing image...");
+
+    const imgPath = path.join(
+      __dirname,
+      "cache",
+      `${Date.now()}_edit.jpg`
+    );
+
     try {
-      // === Image + Prompt handling ===
-      let linkanh = event.messageReply?.attachments?.[0]?.url || null;
-      const prompt = args.join(" ").split("|")[0]?.trim();
+      const API_URL = await getApiUrl();
 
-      if (!linkanh && args.length > 1) {
-        linkanh = args.join(" ").split("|")[1]?.trim();
-      }
+      const payload = {
+        prompt: `Edit the given image based on this description:\n${prompt}`,
+        images: [await urlToBase64(repliedImage.url)],
+        format: "jpg"
+      };
 
-      if (!linkanh || !prompt) {
-        return api.sendMessage(
-          `📸 𝙀𝘿𝙄𝙏•𝙄𝙈𝙂\n━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `⛔️ You must give both a prompt and an image!\n\n` +
-          `✨ Example:\n▶️ edit add cute girlfriend |\n\n` +
-          `🖼️ Or Reply to an image:\n▶️ edit add cute girlfriend`,
-          event.threadID,
-          event.messageID
-        );
-      }
-
-      linkanh = linkanh.replace(/\s/g, "");
-      if (!/^https?:\/\//.test(linkanh)) {
-        return api.sendMessage(
-          `⚠️ Invalid image URL!\n🔗 Must start with http:// or https://`,
-          event.threadID,
-          event.messageID
-        );
-      }
-
-      const apiUrl = `https://masterapi.fun/api/editimg?prompt=${encodeURIComponent(prompt)}&image=${encodeURIComponent(linkanh)}`;
-
-      // Send waiting message
-      const waitMsg = await api.sendMessage(`⏳ Please Wait...`, event.threadID);
-
-      const tempPath = path.join(__dirname, "cache", `edited_${event.senderID}.jpg`);
-      const response = await axios({ method: "GET", url: apiUrl, responseType: "stream" });
-
-      const writer = fs.createWriteStream(tempPath);
-      response.data.pipe(writer);
-
-      writer.on("finish", () => {
-        api.sendMessage(
-          {
-            body: `🔍 Prompt: “${prompt}”\n🖼️ AI Art is ready! ✨`,
-            attachment: fs.createReadStream(tempPath)
-          },
-          event.threadID,
-          () => {
-            fs.unlinkSync(tempPath); // cleanup
-            api.unsendMessage(waitMsg.messageID);
-          },
-          event.messageID
-        );
+      const res = await axios.post(API_URL, payload, {
+        responseType: "arraybuffer",
+        timeout: 180000
       });
 
-      writer.on("error", (err) => {
-        console.error(err);
-        api.sendMessage("❌ Failed to save the image file.", event.threadID, event.messageID);
+      await fs.ensureDir(path.dirname(imgPath));
+      await fs.writeFile(imgPath, Buffer.from(res.data));
+
+      await api.unsendMessage(processingMsg.messageID);
+
+      await message.reply({
+        body: `✅ Image edited successfully\nPrompt: ${prompt}`,
+        attachment: fs.createReadStream(imgPath)
       });
 
     } catch (error) {
-      console.error(error);
-      api.sendMessage("❌ Failed to generate image. Try again later.", event.threadID, event.messageID);
+      console.error("EDIT Error:", error?.response?.data || error.message);
+      await api.unsendMessage(processingMsg.messageID);
+      message.reply("❌ Failed to edit image. Try again later.");
+    } finally {
+      if (fs.existsSync(imgPath)) {
+        await fs.remove(imgPath);
+      }
     }
   }
 };
