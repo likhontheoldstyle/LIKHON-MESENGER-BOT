@@ -29,6 +29,11 @@ module.exports = (
 			return;
 
 		const message = createFuncMessage(api, event);
+
+		if (global.GoatBot.config.noPrefixMode && event.body && !event.body.startsWith(global.GoatBot.config.prefix)) {
+			event.body = global.GoatBot.config.prefix + event.body;
+		}
+
 		await handlerCheckDB(usersData, threadsData, event);
 
 		const handlerChat = await handlerEvents(event, message);
@@ -66,10 +71,9 @@ module.exports = (
 				break;
 
 			case "message_reaction":
-				// 🟡 Custom unsend logic for bot reaction
 				if (["🤦", "😠", "😡", "🤬"].includes(event.reaction)) {
 					if (event.senderID === api.getCurrentUserID()) {
-						const adminBotList = global.GoatBot.config.adminBot || []; // Ensure this is defined in config
+						const adminBotList = global.GoatBot.config.adminBot || []; 
 						if (adminBotList.includes(event.userID)) {
 							api.unsendMessage(event.messageID);
 						}
