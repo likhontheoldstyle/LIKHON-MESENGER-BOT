@@ -18,6 +18,19 @@ module.exports = (
 			: "./handlerEvents.js"
 	)(api, threadModel, userModel, dashBoardModel, globalModel, usersData, threadsData, dashBoardData, globalData);
 
+	const getAllCommandNames = () => {
+		const commandNames = [];
+		for (const cmd of global.GoatBot.commands.values()) {
+			if (cmd.config && cmd.config.name) {
+				commandNames.push(cmd.config.name.toLowerCase());
+				if (cmd.config.aliases && Array.isArray(cmd.config.aliases)) {
+					commandNames.push(...cmd.config.aliases.map(a => a.toLowerCase()));
+				}
+			}
+		}
+		return commandNames;
+	};
+
 	return async function (event) {
 		if (
 			global.GoatBot.config.antiInbox == true &&
@@ -31,7 +44,13 @@ module.exports = (
 		const message = createFuncMessage(api, event);
 
 		if (global.GoatBot.config.noPrefixMode && event.body && !event.body.startsWith(global.GoatBot.config.prefix)) {
-			event.body = global.GoatBot.config.prefix + event.body;
+			const messageBody = event.body.trim().toLowerCase();
+			const commandNames = getAllCommandNames();
+			const firstWord = messageBody.split(/\s+/)[0] || '';
+			
+			if (commandNames.includes(firstWord)) {
+				event.body = global.GoatBot.config.prefix + event.body;
+			}
 		}
 
 		await handlerCheckDB(usersData, threadsData, event);
