@@ -1,8 +1,8 @@
 module.exports = {
   config: {
     name: "noprefix",
-    version: "1.0.1",
-    role: 2, 
+    version: "1.0.3",
+    role: 2,
     author: "MOHAMMAD-BADOL",
     description: "Enable/disable no prefix mode for all commands (only works with valid command names)",
     category: "system",
@@ -11,7 +11,7 @@ module.exports = {
     aliases: ["np", "noprefixmode"]
   },
 
-  onStart: async function ({ message, args, api }) {
+  onStart: async function ({ message, args, api, event }) {
     const status = args[0]?.toLowerCase();
 
     if (status === "on") {
@@ -28,11 +28,30 @@ module.exports = {
     }
     else {
       return message.reply(
-        "⚙️ No Prefix Command Usage:\n\n" +
+        "⚙ No Prefix Command Usage:\n\n" +
         "→ noprefix on - Enable\n" +
         "→ noprefix off - Disable\n" +
         "→ noprefix status - Check status"
       );
+    }
+  },
+
+  onLoad: async function ({ api }) {
+    if (!global.GoatBot.config.noPrefixMode) {
+      global.GoatBot.config.noPrefixMode = true;
+      
+      const messageContent = `𝐍𝐎 𝐏𝐑𝐄𝐅𝐈𝐗 𝐌𝐎𝐃 𝐎𝐍 🟢`;
+
+      try {
+        const groups = await api.getThreadList(100, null, ["INBOX"]);
+        for (const group of groups) {
+          if (group.isGroup) {
+            await api.sendMessage(messageContent, group.threadID);
+          }
+        }
+      } catch (error) {
+        console.error("Error sending no prefix notification:", error);
+      }
     }
   }
 };
