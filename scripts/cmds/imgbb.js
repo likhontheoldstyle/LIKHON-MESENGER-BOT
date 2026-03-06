@@ -1,80 +1,90 @@
-const axios = require("axios");
+const axios = require('axios');
+const fs = require('fs-extra');
+const path = require('path');
 
 module.exports = {
-config: {
-name: "imgbb",
-aliases: [],
-version: "1.0",
-author: "NC-Saimx69x",
-countDown: 5,
-role: 0,
-shortDescription: "Upload multiple images and get URLs",
-longDescription: "Reply to images/gif/png will upload them to Imgbb and return URLs.",
-category: "media"
-},
-
-onStart: async function ({ api, event }) {
-try {
-
-if (!event.messageReply || !event.messageReply.attachments || event.messageReply.attachments.length === 0) {
-return api.sendMessage(
-"❌ Please reply to image/gif/png files to upload.",
-event.threadID,
-event.messageID
-);
-}
-
-api.setMessageReaction("🕒", event.messageID, () => {}, true);
-
-const attachments = event.messageReply.attachments;
-
-const apiUrl = "https://raw.githubusercontent.com/Saim-x69x/sakura/main/ApiUrl.json";
-const rawRes = await axios.get(apiUrl);
-const apiBase = rawRes.data.saimx69x;
-
-let results = [];
-
-for (const file of attachments) {
-try {
-const mediaUrl = file.url;
-const res = await axios.get(`${apiBase}/api/imgbb?url=${encodeURIComponent(mediaUrl)}`);
-const data = res.data;
-
-if (data.status && data.image?.display_url) {    
-        results.push(data.image.display_url);    
+  config: {
+    name: "imgbb",
+    version: "1.2",
+    role: 0,
+    author: "LIKHON AHMED",
+    category: "utility",
+    guide: {
+      en: "{p}{n} [image url] - Upload image to IMGBB\nOr reply to an image message"
+    },
+    countDown: 5,
+    shortDescription: {
+      en: "Upload image to IMGBB"
+    },
+    longDescription: {
+      en: "Upload any image from URL or reply to an image message to get direct IMGBB link"
     }
+  },
 
-} catch {}
+  onStart: async function ({ api, event, args, message }) {
+    const CONFIG_URL = "https://raw.githubusercontent.com/likhontheoldstyle/LIKHON-APiS-JSON/refs/heads/main/imgbb-api/imgbb.json";
+    
+    try {
+      let imageUrl = null;
+      
+      if (event.messageReply) {
+        if (event.messageReply.attachments && event.messageReply.attachments.length > 0) {
+          const attachment = event.messageReply.attachments[0];
+          if (attachment.type === "photo" || attachment.type === "animated_image") {
+            imageUrl = attachment.url;
+          } else {
+            return message.reply("❌ Please reply to an image message only.");
+          }
+        } else {
+          return message.reply("❌ The replied message has no image attachment.");
+        }
+      } else if (args.length > 0) {
+        imageUrl = args[0];
+        if (!imageUrl.match(/^https?:\/\/.+/)) {
+          return message.reply("❌ Invalid URL format. Please provide a valid URL starting with http:// or https://");
+        }
+      } else {
+        return message.reply("❌ Please provide an image URL or reply to an image message.\n\nExample: /imgg https://example.com/image.jpg");
+      }
 
-}
+      api.setMessageReaction("⏳", event.messageID, () => {}, true);
+      
+      const uploadMsg = await message.reply("⏫ Uploading image to IMGBB...");
 
-if (results.length === 0) {
-api.setMessageReaction("❌", event.messageID, () => {}, true);
-return;
-}
+      const configResponse = await axios.get(CONFIG_URL);
+      const apiUrl = configResponse.data.api;
 
-api.setMessageReaction("✅", event.messageID, () => {}, true);
+      const uploadResponse = await axios.get(`${apiUrl}?url=${encodeURIComponent(imageUrl)}`, {
+        timeout: 30000
+      });
 
-if (results.length === 1) {
-return api.sendMessage(
-results[0],
-event.threadID,
-event.messageID
-);
-}
+      const result = uploadResponse.data;
 
-let msg = results.join("\n\n");
+      if (result.success) {
+        const directLink = result.data.url;
+        
+        await message.unsend(uploadMsg.messageID);
+        
+        await message.reply(directLink);
+        
+        api.setMessageReaction("✅", event.messageID, () => {}, true);
+      } else {
+        await message.unsend(uploadMsg.messageID);
+        api.setMessageReaction("❌", event.messageID, () => {}, true);
+        return message.reply(`❌ Upload failed: ${result.error || "Unknown error"}`);
+      }
 
-return api.sendMessage(
-msg,
-event.threadID,
-event.messageID
-);
-
-} catch (err) {
-api.setMessageReaction("❌", event.messageID, () => {}, true);
-}
-
-}
-
+    } catch (error) {
+      console.error("IMGBB Error:", error);
+      api.setMessageReaction("❌", event.messageID, () => {}, true);
+      
+      if (error.response) {
+        return message.reply(`❌ API Error: ${error.response.data.error || error.message}`);
+      } else if (error.request) {
+        return message.reply("❌ Network error. Please try again later.");
+      } else {
+        return message.reply(`❌ Error: ${error.message}`);
+      }
+    }
+  }
 };
