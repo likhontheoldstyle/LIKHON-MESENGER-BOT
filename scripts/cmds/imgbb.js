@@ -9,7 +9,8 @@ author: "NC-Saimx69x",
 countDown: 5,
 role: 0,
 shortDescription: "Upload multiple images and get URLs",
-longDescription: "Reply to images/gif/png will upload them to Imgbb and return URLs."
+longDescription: "Reply to images/gif/png will upload them to Imgbb and return URLs.",
+category: "media"
 },
 
 onStart: async function ({ api, event }) {
