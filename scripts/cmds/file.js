@@ -18,7 +18,7 @@ module.exports = {
     const allowedUIDs = [
       "61572915213085",
       "100090095242819",          
-      "UID3",           
+      "1086955587",           
       "UID4"            
     ];
 
