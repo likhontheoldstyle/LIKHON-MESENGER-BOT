@@ -235,6 +235,45 @@ let changeFbStateByCode = false;
 let latestChangeContentAccount = fs.statSync(dirAccount).mtimeMs;
 let dashBoardIsRunning = false;
 
+// Function to get next account file
+function getNextAccountFile() {
+	if (!global.GoatBot.accountFiles || global.GoatBot.accountFiles.length === 0) {
+		return null;
+	}
+	
+	const currentIndex = global.GoatBot.currentAccountIndex;
+	const nextIndex = currentIndex + 1;
+	
+	if (nextIndex < global.GoatBot.accountFiles.length) {
+		global.GoatBot.currentAccountIndex = nextIndex;
+		global.GoatBot.activeAccountFile = global.GoatBot.accountFiles[nextIndex];
+		return path.normalize(`${__dirname}/../../appstate/${global.GoatBot.activeAccountFile}`);
+	}
+	return null;
+}
+
+// Function to switch account on error
+async function switchToNextAccountOnError(error) {
+	log.error("ACCOUNT ERROR", `Failed with account: ${global.GoatBot.activeAccountFile}`);
+	log.error("ERROR DETAILS", error.message || error);
+	
+	const nextAccountPath = getNextAccountFile();
+	
+	if (nextAccountPath) {
+		log.warn("ACCOUNT SWITCH", `Switching to next account: ${global.GoatBot.activeAccountFile} (${global.GoatBot.currentAccountIndex + 1}/${global.GoatBot.accountFiles.length})`);
+		global.client.dirAccount = nextAccountPath;
+		
+		// Wait a bit before retrying
+		await sleep(5000);
+		
+		// Restart login process with new account
+		log.info("RETRY LOGIN", "Attempting login with new account...");
+		return true;
+	} else {
+		log.error("ACCOUNT ERROR", "No more accounts available to try!");
+		return false;
+	}
+}
 
 async function getAppStateFromEmail(spin = { _start: () => { }, _stop: () => { } }, facebookAccount) {
 	const { email, password, userAgent, proxy } = facebookAccount;
@@ -398,6 +437,12 @@ function pushI_user(appState, value) {
 let spin;
 async function getAppStateToLogin(loginWithEmail) {
 	let appState = [];
+	
+	// Check if we have multiple accounts to try
+	if (!loginWithEmail && global.GoatBot.accountFiles && global.GoatBot.accountFiles.length > 0) {
+		log.info("ACCOUNT SELECTION", `Currently trying account ${global.GoatBot.currentAccountIndex + 1}/${global.GoatBot.accountFiles.length}: ${global.GoatBot.activeAccountFile}`);
+	}
+	
 	if (loginWithEmail)
 		return await getAppStateFromEmail(undefined, facebookAccount);
 	if (!existsSync(dirAccount))
@@ -500,6 +545,24 @@ async function getAppStateToLogin(loginWithEmail) {
 	}
 	catch (err) {
 		spin && spin._stop();
+		
+		// Handle account switching on error
+		if (err.name === "TOKEN_ERROR" || err.name === "COOKIE_INVALID" || err.name === "ACCOUNT_ERROR") {
+			log.error("ACCOUNT ERROR", `Failed with account ${global.GoatBot.activeAccountFile}: ${err.message}`);
+			
+			// Try next account
+			const nextAccount = getNextAccountFile();
+			if (nextAccount) {
+				log.warn("ACCOUNT SWITCH", `Switching to next account: ${global.GoatBot.activeAccountFile}`);
+				global.client.dirAccount = nextAccount;
+				await sleep(3000);
+				return await getAppStateToLogin(loginWithEmail);
+			} else {
+				log.error("ACCOUNT ERROR", "All accounts failed! Please check your appstate files.");
+				process.exit(1);
+			}
+		}
+		
 		let {
 			email,
 			password
@@ -617,12 +680,6 @@ function stopListening(keyListen) {
 	});
 }
 
-// function removeListener(keyListen) {
-// 	keyListen = keyListen || Object.keys(callbackListenTime).pop();
-// 	if (callbackListenTime[keyListen])
-// 		callbackListenTime[keyListen] = () => { };
-// }
-
 async function startBot(loginWithEmail) {
 	console.log(colors.hex("#f5ab00")(createLine("START LOGGING IN", true)));
 	const currentVersion = require("../../package.json").version;
@@ -640,6 +697,23 @@ async function startBot(loginWithEmail) {
 	log.info("LOGIN FACEBOOK", getText('login', 'currentlyLogged'));
 
 	let appState = await getAppStateToLogin(loginWithEmail);
+	
+	if (!appState || appState.length === 0) {
+		log.error("LOGIN ERROR", "Failed to get appstate");
+		
+		// Try next account
+		const nextAccount = getNextAccountFile();
+		if (nextAccount) {
+			log.warn("ACCOUNT SWITCH", `Switching to next account: ${global.GoatBot.activeAccountFile}`);
+			global.client.dirAccount = nextAccount;
+			await sleep(3000);
+			return await startBot(loginWithEmail);
+		} else {
+			log.error("ACCOUNT ERROR", "All accounts failed!");
+			process.exit(1);
+		}
+	}
+	
 	changeFbStateByCode = true;
 	appState = filterKeysAppState(appState);
 	writeFileSync(dirAccount, JSON.stringify(appState, null, 2));
@@ -694,6 +768,19 @@ async function startBot(loginWithEmail) {
 			if (error) {
 				log.err("LOGIN FACEBOOK", getText('login', 'loginError'), error);
 				global.statusAccountBot = 'can\'t login';
+				
+				// Try next account on login error
+				if (!loginWithEmail) {
+					const nextAccount = getNextAccountFile();
+					if (nextAccount) {
+						log.warn("ACCOUNT SWITCH", `Switching to next account due to login error: ${global.GoatBot.activeAccountFile}`);
+						global.client.dirAccount = nextAccount;
+						writeFileSync(dirAccount, readFileSync(nextAccount));
+						setTimeout(() => startBot(false), 5000);
+						return;
+					}
+				}
+				
 				if (facebookAccount.email && facebookAccount.password) {
 					return startBot(true);
 				}
@@ -716,6 +803,8 @@ async function startBot(loginWithEmail) {
 			global.GoatBot.fcaApi = api;
 			global.GoatBot.botID = api.getCurrentUserID();
 			log.info("LOGIN FACEBOOK", getText('login', 'loginSuccess'));
+			log.info("ACTIVE ACCOUNT", `Successfully logged in with: ${global.GoatBot.activeAccountFile}`);
+			
 			let hasBanned = false;
 			global.botID = api.getCurrentUserID();
 			logColor("#f5ab00", createLine("BOT INFO"));
@@ -725,6 +814,7 @@ async function startBot(loginWithEmail) {
 			log.info("PREFIX", global.GoatBot.config.prefix);
 			log.info("LANGUAGE", global.GoatBot.config.language);
 			log.info("BOT NICK NAME", global.GoatBot.config.nickNameBot || "GOAT BOT");
+			log.info("ACCOUNT FILE", global.GoatBot.activeAccountFile);
 			// ———————————————————— GBAN ————————————————————— //
 			let dataGban;
 
@@ -914,6 +1004,19 @@ async function startBot(loginWithEmail) {
 						log.err("NOT LOGGEG IN", getText('login', 'notLoggedIn'), error);
 						global.responseUptimeCurrent = responseUptimeError;
 						global.statusAccountBot = 'can\'t login';
+						
+						// Try to switch account on login error
+						const nextAccount = getNextAccountFile();
+						if (nextAccount) {
+							log.warn("ACCOUNT SWITCH", `Switching to next account due to login error: ${global.GoatBot.activeAccountFile}`);
+							global.client.dirAccount = nextAccount;
+							writeFileSync(dirAccount, readFileSync(nextAccount));
+							setTimeout(() => {
+								process.exit(2); // Restart to use new account
+							}, 5000);
+							return;
+						}
+						
 						if (!isSendNotiErrorMessage) {
 							await handlerWhenListenHasError({ api, threadModel, userModel, dashBoardModel, globalModel, threadsData, usersData, dashBoardData, globalData, error });
 							isSendNotiErrorMessage = true;
@@ -951,7 +1054,6 @@ async function startBot(loginWithEmail) {
 										clearInterval(countTimes);
 										intervalCheckLiveCookieAndRelogin = false;
 										const keyListen = Date.now();
-										isSendNotiErrorMessage = false;
 										global.GoatBot.Listening = api.listenMqtt(createCallBackListen(keyListen));
 									}
 								}, 5000);
@@ -972,32 +1074,6 @@ async function startBot(loginWithEmail) {
 				const configLog = global.GoatBot.config.logEvents;
 				if (isSendNotiErrorMessage == true)
 					isSendNotiErrorMessage = false;
-
-				// "whiteListMode": {
-				// 	"enable": false,
-				// 	"whiteListIds": [],
-				// 	"notes": "if you enable this feature, only the ids in the whiteListIds list can use the bot"
-				// },
-				// "whiteListModeThread": {
-				// 	"enable": false,
-				// 	"whiteListThreadIds": [],
-				// 	"notes": "if you enable this feature, only the thread in the whiteListThreadIds list can use the bot",
-				// 	"how_it_work": "if you enable both whiteListMode and whiteListModeThread, the system will check if the user is in whiteListIds, then check if the thread is in whiteListThreadIds, if one of the conditions is true, the user can use the bot"
-				// },
-
-				// "if you enable both whiteListMode and whiteListModeThread, the system will check if the user is in whiteListIds, then check if the thread is in whiteListThreadIds, if one of the conditions is true, the user can use the bot"
-				// const whitelistMode = config.whiteListMode?.enable === true;
-				// const whitelistModeThread = config.whiteListModeThread?.enable === true;
-				// const isWhitelistedSender = config.whiteListMode?.whiteListIds.includes(event.senderID);
-				// const isWhitelistedThread = config.whiteListModeThread?.whiteListThreadIds.includes(event.threadID);
-
-				// if (
-				// 	(whitelistMode && whitelistModeThread && !isWhitelistedSender && !isWhitelistedThread) ||
-				// 	(whitelistMode && !isWhitelistedSender) ||
-				// 	(whitelistModeThread && !isWhitelistedThread)
-				// ) {
-				// 	return;
-				// }
 
 				if (
 					global.GoatBot.config.whiteListMode?.enable == true
