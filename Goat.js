@@ -52,25 +52,39 @@ if (!fs.existsSync(appstateDir)) {
 	fs.mkdirSync(appstateDir, { recursive: true });
 }
 
-// Function to get all account files from appstate folder
-function getAccountFiles() {
+// Function to check if account file has valid cookie data
+function isValidAccountFile(filePath) {
+	try {
+		if (!fs.existsSync(filePath)) return false;
+		const content = fs.readFileSync(filePath, 'utf8');
+		if (!content || content.trim() === '') return false;
+		
+		// Try to parse JSON to validate it's proper cookie data
+		const parsed = JSON.parse(content);
+		// Check if it's an array with at least one item (basic validation for Facebook appstate)
+		return Array.isArray(parsed) && parsed.length > 0;
+	} catch (err) {
+		return false;
+	}
+}
+
+// Function to get all valid account files from appstate folder
+function getValidAccountFiles() {
 	try {
 		const files = fs.readdirSync(appstateDir);
-		// Filter only .txt files and sort them naturally (account1.txt, account2.txt, etc.)
+		// Filter only .txt files that start with 'account' and have valid content
 		const accountFiles = files
 			.filter(file => file.startsWith('account') && file.endsWith('.txt'))
 			.sort((a, b) => {
 				const numA = parseInt(a.match(/\d+/)?.[0] || '0');
 				const numB = parseInt(b.match(/\d+/)?.[0] || '0');
 				return numA - numB;
+			})
+			.filter(file => {
+				const fullPath = path.normalize(`${appstateDir}/${file}`);
+				return isValidAccountFile(fullPath);
 			});
 		
-		if (accountFiles.length === 0) {
-			log.warn("APPSTATE", "No account files found in appstate folder!");
-			return [];
-		}
-		
-		log.info("APPSTATE", `Found ${accountFiles.length} account file(s): ${accountFiles.join(', ')}`);
 		return accountFiles;
 	} catch (err) {
 		log.error("APPSTATE", "Error reading appstate folder:", err);
@@ -78,17 +92,41 @@ function getAccountFiles() {
 	}
 }
 
-// Get the first available account file
-const accountFiles = getAccountFiles();
-let activeAccountFile = accountFiles.length > 0 ? accountFiles[0] : null;
-const dirAccount = activeAccountFile ? path.normalize(`${appstateDir}/${activeAccountFile}`) : null;
+// Get all valid account files
+const validAccountFiles = getValidAccountFiles();
+
+// Track invalid account files (ones with empty/invalid data)
+function getInvalidAccountFiles() {
+	try {
+		const files = fs.readdirSync(appstateDir);
+		return files
+			.filter(file => file.startsWith('account') && file.endsWith('.txt'))
+			.filter(file => {
+				const fullPath = path.normalize(`${appstateDir}/${file}`);
+				return !isValidAccountFile(fullPath);
+			})
+			.map(file => file);
+	} catch (err) {
+		return [];
+	}
+}
+
+const invalidAccountFiles = getInvalidAccountFiles();
+if (invalidAccountFiles.length > 0) {
+	log.warn("APPSTATE", `Found ${invalidAccountFiles.length} invalid/empty account file(s): ${invalidAccountFiles.join(', ')}. These will be skipped.`);
+}
+
+// Get the first valid account file
+let activeAccountFile = validAccountFiles.length > 0 ? validAccountFiles[0] : null;
+let dirAccount = activeAccountFile ? path.normalize(`${appstateDir}/${activeAccountFile}`) : null;
 
 if (!dirAccount) {
-	log.error("APPSTATE", "No account file found! Please add account files (account1.txt, account2.txt, etc.) in the appstate folder.");
+	log.error("APPSTATE", "No valid account file found! Please add valid cookie data in account files (account1.txt, account2.txt, etc.) in the appstate folder.");
 	process.exit(0);
 }
 
-log.info("APPSTATE", `Using account file: ${activeAccountFile}`);
+log.info("APPSTATE", `Found ${validAccountFiles.length} valid account file(s): ${validAccountFiles.join(', ')}`);
+log.info("APPSTATE", `Using account file: ${activeAccountFile} (${validAccountFiles.indexOf(activeAccountFile) + 1}/${validAccountFiles.length} valid accounts)`);
 
 for (const pathDir of [dirConfig, dirConfigCommands]) {
 	try {
@@ -130,13 +168,34 @@ global.GoatBot = {
 	fcaApi: null, // store fca api
 	botID: null, // store bot id
 	// Add these for multiple account support
-	accountFiles: accountFiles, // all available account files
+	accountFiles: validAccountFiles, // all valid account files
 	currentAccountIndex: 0, // index of current active account
-	activeAccountFile: activeAccountFile // current active account file
+	activeAccountFile: activeAccountFile, // current active account file
+	allAccountFiles: {
+		valid: validAccountFiles,
+		invalid: invalidAccountFiles,
+		total: validAccountFiles.length + invalidAccountFiles.length
+	}
 };
 
-// Function to switch to next account
+// Function to check if current account is still valid
+global.GoatBot.isCurrentAccountValid = function() {
+	if (!global.GoatBot.activeAccountFile) return false;
+	const accountPath = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
+	return isValidAccountFile(accountPath);
+};
+
+// Function to switch to next valid account
 global.GoatBot.switchToNextAccount = function() {
+	// Get fresh list of valid accounts (in case files changed)
+	const currentValidAccounts = getValidAccountFiles();
+	
+	// Update our stored list if it changed
+	if (currentValidAccounts.length > 0) {
+		global.GoatBot.accountFiles = currentValidAccounts;
+	}
+	
+	// Try next account in the list
 	const nextIndex = global.GoatBot.currentAccountIndex + 1;
 	if (nextIndex < global.GoatBot.accountFiles.length) {
 		global.GoatBot.currentAccountIndex = nextIndex;
@@ -144,10 +203,47 @@ global.GoatBot.switchToNextAccount = function() {
 		global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
 		log.warn("APPSTATE", `Switching to next account: ${global.GoatBot.activeAccountFile} (${nextIndex + 1}/${global.GoatBot.accountFiles.length})`);
 		return true;
-	} else {
-		log.error("APPSTATE", "No more accounts available to try!");
+	} 
+	// If we've tried all accounts, loop back to first and check if any new valid accounts appeared
+	else {
+		// Try to find any valid accounts again (maybe some new ones were added)
+		const freshValidAccounts = getValidAccountFiles();
+		if (freshValidAccounts.length > 0) {
+			// If we have different accounts now, start from first
+			if (JSON.stringify(freshValidAccounts) !== JSON.stringify(global.GoatBot.accountFiles)) {
+				global.GoatBot.accountFiles = freshValidAccounts;
+				global.GoatBot.currentAccountIndex = 0;
+				global.GoatBot.activeAccountFile = freshValidAccounts[0];
+				global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
+				log.warn("APPSTATE", `Found new valid accounts, switching to: ${global.GoatBot.activeAccountFile}`);
+				return true;
+			}
+			// If same accounts, try first one again (maybe it's working now)
+			else {
+				global.GoatBot.currentAccountIndex = 0;
+				global.GoatBot.activeAccountFile = global.GoatBot.accountFiles[0];
+				global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
+				log.warn("APPSTATE", `All accounts tried, looping back to first: ${global.GoatBot.activeAccountFile}`);
+				return true;
+			}
+		}
+		log.error("APPSTATE", "No valid accounts available to try!");
 		return false;
 	}
+};
+
+// Function to get account status summary
+global.GoatBot.getAccountStatus = function() {
+	const valid = global.GoatBot.allAccountFiles.valid;
+	const invalid = global.GoatBot.allAccountFiles.invalid;
+	return {
+		current: global.GoatBot.activeAccountFile,
+		currentIndex: global.GoatBot.currentAccountIndex + 1,
+		totalValid: valid.length,
+		totalInvalid: invalid.length,
+		validAccounts: valid,
+		invalidAccounts: invalid
+	};
 };
 
 global.db = {
