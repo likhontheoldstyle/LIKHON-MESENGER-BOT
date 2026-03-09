@@ -175,7 +175,8 @@ global.GoatBot = {
 		valid: validAccountFiles,
 		invalid: invalidAccountFiles,
 		total: validAccountFiles.length + invalidAccountFiles.length
-	}
+	},
+	accountSwitchInProgress: false // Flag to prevent multiple simultaneous switch attempts
 };
 
 // Function to check if current account is still valid
@@ -187,50 +188,88 @@ global.GoatBot.isCurrentAccountValid = function() {
 
 // Function to switch to next valid account
 global.GoatBot.switchToNextAccount = function() {
-	// Get fresh list of valid accounts (in case files changed)
-	const currentValidAccounts = getValidAccountFiles();
-	
-	// Update our stored list if it changed
-	if (currentValidAccounts.length > 0) {
-		global.GoatBot.accountFiles = currentValidAccounts;
-	}
-	
-	// Try next account in the list
-	const nextIndex = global.GoatBot.currentAccountIndex + 1;
-	if (nextIndex < global.GoatBot.accountFiles.length) {
-		global.GoatBot.currentAccountIndex = nextIndex;
-		global.GoatBot.activeAccountFile = global.GoatBot.accountFiles[nextIndex];
-		global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
-		log.warn("APPSTATE", `Switching to next account: ${global.GoatBot.activeAccountFile} (${nextIndex + 1}/${global.GoatBot.accountFiles.length})`);
-		return true;
-	} 
-	// If we've tried all accounts, loop back to first and check if any new valid accounts appeared
-	else {
-		// Try to find any valid accounts again (maybe some new ones were added)
-		const freshValidAccounts = getValidAccountFiles();
-		if (freshValidAccounts.length > 0) {
-			// If we have different accounts now, start from first
-			if (JSON.stringify(freshValidAccounts) !== JSON.stringify(global.GoatBot.accountFiles)) {
-				global.GoatBot.accountFiles = freshValidAccounts;
-				global.GoatBot.currentAccountIndex = 0;
-				global.GoatBot.activeAccountFile = freshValidAccounts[0];
-				global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
-				log.warn("APPSTATE", `Found new valid accounts, switching to: ${global.GoatBot.activeAccountFile}`);
-				return true;
-			}
-			// If same accounts, try first one again (maybe it's working now)
-			else {
-				global.GoatBot.currentAccountIndex = 0;
-				global.GoatBot.activeAccountFile = global.GoatBot.accountFiles[0];
-				global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
-				log.warn("APPSTATE", `All accounts tried, looping back to first: ${global.GoatBot.activeAccountFile}`);
-				return true;
-			}
-		}
-		log.error("APPSTATE", "No valid accounts available to try!");
+	// Prevent multiple simultaneous switch attempts
+	if (global.GoatBot.accountSwitchInProgress) {
+		log.warn("APPSTATE", "Account switch already in progress, skipping...");
 		return false;
 	}
+	
+	global.GoatBot.accountSwitchInProgress = true;
+	
+	try {
+		// Get fresh list of valid accounts (in case files changed)
+		const currentValidAccounts = getValidAccountFiles();
+		
+		// Update our stored list if it changed
+		if (currentValidAccounts.length > 0) {
+			global.GoatBot.accountFiles = currentValidAccounts;
+		}
+		
+		// Try next account in the list
+		const nextIndex = global.GoatBot.currentAccountIndex + 1;
+		if (nextIndex < global.GoatBot.accountFiles.length) {
+			global.GoatBot.currentAccountIndex = nextIndex;
+			global.GoatBot.activeAccountFile = global.GoatBot.accountFiles[nextIndex];
+			global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
+			log.warn("APPSTATE", `Switching to next account: ${global.GoatBot.activeAccountFile} (${nextIndex + 1}/${global.GoatBot.accountFiles.length})`);
+			
+			// Mark the dead account file as invalid
+			markAccountAsInvalid(global.GoatBot.accountFiles[nextIndex - 1]);
+			
+			return true;
+		} 
+		// If we've tried all accounts, loop back to first and check if any new valid accounts appeared
+		else {
+			// Try to find any valid accounts again (maybe some new ones were added)
+			const freshValidAccounts = getValidAccountFiles();
+			if (freshValidAccounts.length > 0) {
+				// If we have different accounts now, start from first
+				if (JSON.stringify(freshValidAccounts) !== JSON.stringify(global.GoatBot.accountFiles)) {
+					global.GoatBot.accountFiles = freshValidAccounts;
+					global.GoatBot.currentAccountIndex = 0;
+					global.GoatBot.activeAccountFile = freshValidAccounts[0];
+					global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
+					log.warn("APPSTATE", `Found new valid accounts, switching to: ${global.GoatBot.activeAccountFile}`);
+					return true;
+				}
+				// If same accounts, try first one again (maybe it's working now)
+				else {
+					global.GoatBot.currentAccountIndex = 0;
+					global.GoatBot.activeAccountFile = global.GoatBot.accountFiles[0];
+					global.client.dirAccount = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
+					log.warn("APPSTATE", `All accounts tried, looping back to first: ${global.GoatBot.activeAccountFile}`);
+					return true;
+				}
+			}
+			log.error("APPSTATE", "No valid accounts available to try!");
+			return false;
+		}
+	} finally {
+		// Reset the flag after switch attempt (with small delay to prevent immediate retry)
+		setTimeout(() => {
+			global.GoatBot.accountSwitchInProgress = false;
+		}, 5000);
+	}
 };
+
+// Helper function to mark an account as invalid
+function markAccountAsInvalid(accountFile) {
+	try {
+		const accountPath = path.normalize(`${appstateDir}/${accountFile}`);
+		if (fs.existsSync(accountPath)) {
+			// Rename the file to mark it as dead (optional)
+			const deadAccountPath = path.normalize(`${appstateDir}/dead_${accountFile}`);
+			fs.renameSync(accountPath, deadAccountPath);
+			log.warn("APPSTATE", `Marked account ${accountFile} as dead and renamed to dead_${accountFile}`);
+			
+			// Update the invalid accounts list
+			global.GoatBot.allAccountFiles.invalid.push(`dead_${accountFile}`);
+			global.GoatBot.allAccountFiles.valid = global.GoatBot.allAccountFiles.valid.filter(f => f !== accountFile);
+		}
+	} catch (err) {
+		log.error("APPSTATE", `Error marking account as invalid: ${err.message}`);
+	}
+}
 
 // Function to get account status summary
 global.GoatBot.getAccountStatus = function() {
@@ -244,6 +283,28 @@ global.GoatBot.getAccountStatus = function() {
 		validAccounts: valid,
 		invalidAccounts: invalid
 	};
+};
+
+// Function to check account health periodically
+global.GoatBot.startAccountHealthCheck = function(intervalMinutes = 5) {
+	setInterval(() => {
+		if (global.GoatBot.fcaApi && global.GoatBot.botID) {
+			// Simple health check - try to get user info
+			global.GoatBot.fcaApi.getUserInfo(global.GoatBot.botID, (err, userInfo) => {
+				if (err || !userInfo || !userInfo[global.GoatBot.botID]) {
+					log.warn("APPSTATE", "Account health check failed, attempting to switch account...");
+					global.GoatBot.switchToNextAccount();
+					
+					// Trigger re-login with new account
+					if (global.GoatBot.reLoginBot) {
+						global.GoatBot.reLoginBot();
+					}
+				} else {
+					log.info("APPSTATE", "Account health check passed");
+				}
+			});
+		}
+	}, intervalMinutes * 60 * 1000);
 };
 
 global.db = {
@@ -441,6 +502,9 @@ if (config.autoRestart) {
 	utils.drive.parentID = parentIdGoogleDrive;
 	// ———————————————————— LOGIN ———————————————————— //
 	require(`./bot/login/login${NODE_ENV === 'development' ? '.dev.js' : '.js'}`);
+	
+	// Start account health check after login (default every 5 minutes)
+	global.GoatBot.startAccountHealthCheck(5);
 })();
 
 function compareVersion(version1, version2) {
