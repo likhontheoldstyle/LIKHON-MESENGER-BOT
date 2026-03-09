@@ -4,9 +4,9 @@ const path = require("path");
 
 module.exports = {
   config: {
-    name: "emoji_voice",
+    name: "emojisound",
     version: "2.0.2",
-    author: "MOHAMMAD AKASH",
+    author: "LIKHON AHMED",
     countDown: 5,
     role: 0,
     shortDescription: "Sends a cute girl's voice when an emoji is used 😍",
