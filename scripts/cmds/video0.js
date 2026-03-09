@@ -1,6 +1,6 @@
 module.exports = {
   config: {
-    name: "video",
+    name: "video0",
     version: "1.1",
     author: "kshitiz",//respect author dont change
     countDown: 5,
