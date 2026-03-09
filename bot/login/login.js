@@ -43,7 +43,7 @@ function compareVersion(version1, version2) {
 	return 0; // version1 = version2
 }
 
-const { writeFileSync, readFileSync, existsSync, watch } = require("fs-extra");
+const { writeFileSync, readFileSync, existsSync, watch, readdirSync } = require("fs-extra");
 const handlerWhenListenHasError = require("./handlerWhenListenHasError.js");
 const checkLiveCookie = require("./checkLiveCookie.js");
 const { callbackListenTime, storage5Message } = global.GoatBot;
@@ -235,10 +235,13 @@ let changeFbStateByCode = false;
 let latestChangeContentAccount = fs.statSync(dirAccount).mtimeMs;
 let dashBoardIsRunning = false;
 
-// ==================== MULTI-ACCOUNT SUPPORT FUNCTIONS ====================
+// ==================== MULTI-ACCOUNT AUTO-SWITCH SYSTEM WITH FOLDER SCAN ====================
 
 // Get the appstate directory path
 const appstateDir = path.normalize(`${process.cwd()}/appstate`);
+
+// Track dead accounts to avoid reusing them
+let deadAccounts = new Set();
 
 // Function to check if account file has valid cookie data
 function isValidAccountFile(filePath) {
@@ -256,115 +259,171 @@ function isValidAccountFile(filePath) {
 	}
 }
 
-// Function to get all valid account files
-function getValidAccountFiles() {
+// Function to get all valid account files with fresh folder scan
+function scanAppstateFolder() {
 	try {
 		if (!fs.existsSync(appstateDir)) {
 			fs.mkdirSync(appstateDir, { recursive: true });
+			log.info("FOLDER SCAN", "Created appstate folder");
 			return [];
 		}
 		
 		const files = fs.readdirSync(appstateDir);
-		// Filter only .txt files that start with 'account' and have valid content
+		log.info("FOLDER SCAN", `Scanning appstate folder, found ${files.length} total files`);
+		
+		// Filter only .txt files that start with 'account' 
 		const accountFiles = files
 			.filter(file => file.startsWith('account') && file.endsWith('.txt'))
 			.sort((a, b) => {
 				const numA = parseInt(a.match(/\d+/)?.[0] || '0');
 				const numB = parseInt(b.match(/\d+/)?.[0] || '0');
 				return numA - numB;
-			})
-			.filter(file => {
-				const fullPath = path.normalize(`${appstateDir}/${file}`);
-				return isValidAccountFile(fullPath);
 			});
 		
-		return accountFiles;
+		if (accountFiles.length === 0) {
+			log.warn("FOLDER SCAN", "No account files found (account1.txt, account2.txt, etc.)");
+			return [];
+		}
+		
+		// Check each file for validity
+		const validFiles = [];
+		const invalidFiles = [];
+		
+		for (const file of accountFiles) {
+			const fullPath = path.normalize(`${appstateDir}/${file}`);
+			const isValid = isValidAccountFile(fullPath);
+			
+			if (isValid) {
+				validFiles.push(file);
+			} else {
+				invalidFiles.push(file);
+			}
+		}
+		
+		log.info("FOLDER SCAN", `Valid accounts: ${validFiles.length}, Invalid/Empty: ${invalidFiles.length}`);
+		
+		if (invalidFiles.length > 0) {
+			log.warn("FOLDER SCAN", `Invalid files: ${invalidFiles.join(', ')}`);
+		}
+		
+		return validFiles;
+		
 	} catch (err) {
-		log.error("APPSTATE", "Error reading appstate folder:", err);
+		log.error("FOLDER SCAN", "Error scanning appstate folder:", err);
 		return [];
 	}
 }
 
-// Function to refresh valid accounts list
+// Function to refresh valid accounts list with fresh folder scan
 function refreshValidAccounts() {
-	const validAccounts = getValidAccountFiles();
-	if (validAccounts.length > 0) {
-		global.GoatBot.accountFiles = validAccounts;
-		// Update allAccountFiles info
-		global.GoatBot.allAccountFiles.valid = validAccounts;
-		
-		// Also update invalid accounts
-		try {
-			const files = fs.readdirSync(appstateDir);
-			global.GoatBot.allAccountFiles.invalid = files
-				.filter(file => file.startsWith('account') && file.endsWith('.txt'))
-				.filter(file => {
-					const fullPath = path.normalize(`${appstateDir}/${file}`);
-					return !isValidAccountFile(fullPath);
-				});
-		} catch (err) {}
-		
-		global.GoatBot.allAccountFiles.total = validAccounts.length + global.GoatBot.allAccountFiles.invalid.length;
-	}
+	const validAccounts = scanAppstateFolder();
+	
+	// Update global variables
+	global.GoatBot.accountFiles = validAccounts;
+	global.GoatBot.allAccountFiles.valid = validAccounts;
+	
+	// Update invalid accounts list
+	try {
+		const files = fs.readdirSync(appstateDir);
+		global.GoatBot.allAccountFiles.invalid = files
+			.filter(file => file.startsWith('account') && file.endsWith('.txt'))
+			.filter(file => !validAccounts.includes(file));
+	} catch (err) {}
+	
+	global.GoatBot.allAccountFiles.total = validAccounts.length + global.GoatBot.allAccountFiles.invalid.length;
+	
 	return validAccounts;
 }
 
-// Function to get next account file
-function getNextAccountFile() {
-	// Refresh valid accounts list
-	const validAccounts = refreshValidAccounts();
+// Function to get next valid account from fresh folder scan
+function getNextValidAccountFromFolder() {
+	// Force fresh scan of appstate folder
+	log.info("ACCOUNT CHECK", "🔍 Scanning appstate folder for valid cookies...");
+	const validAccounts = scanAppstateFolder();
 	
 	if (!validAccounts || validAccounts.length === 0) {
+		log.error("FOLDER SCAN", "❌ No valid accounts found in appstate folder!");
 		return null;
 	}
 	
-	const currentIndex = global.GoatBot.currentAccountIndex;
-	const nextIndex = currentIndex + 1;
+	// Log available accounts
+	log.info("FOLDER SCAN", `📁 Found ${validAccounts.length} valid accounts:`);
+	validAccounts.forEach((acc, idx) => {
+		const status = deadAccounts.has(acc) ? "⚠️ DEAD" : "✅ AVAILABLE";
+		log.info("ACCOUNT LIST", `  ${idx + 1}. ${acc} ${status}`);
+	});
 	
-	if (nextIndex < validAccounts.length) {
-		global.GoatBot.currentAccountIndex = nextIndex;
-		global.GoatBot.activeAccountFile = validAccounts[nextIndex];
-		const accountPath = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
-		log.warn("ACCOUNT SWITCH", `Switching to account: ${global.GoatBot.activeAccountFile} (${nextIndex + 1}/${validAccounts.length})`);
-		return accountPath;
+	// First try accounts that are not marked dead
+	for (let i = 0; i < validAccounts.length; i++) {
+		const accountFile = validAccounts[i];
+		if (!deadAccounts.has(accountFile)) {
+			global.GoatBot.currentAccountIndex = i;
+			global.GoatBot.activeAccountFile = accountFile;
+			const accountPath = path.normalize(`${appstateDir}/${accountFile}`);
+			log.success("ACCOUNT SELECTED", `✅ Selected: ${accountFile} (${i + 1}/${validAccounts.length})`);
+			return accountPath;
+		}
 	}
-	// Try to loop back to first account if we've tried all
-	else if (validAccounts.length > 0) {
+	
+	// If all are dead, try the first one anyway (maybe it revived?)
+	if (validAccounts.length > 0) {
+		log.warn("ACCOUNT CHECK", "⚠️ All accounts marked dead, but will try first account...");
+		deadAccounts.clear(); // Reset dead accounts
 		global.GoatBot.currentAccountIndex = 0;
 		global.GoatBot.activeAccountFile = validAccounts[0];
-		const accountPath = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
-		log.warn("ACCOUNT SWITCH", `All accounts tried, looping back to first: ${global.GoatBot.activeAccountFile}`);
-		return accountPath;
+		return path.normalize(`${appstateDir}/${validAccounts[0]}`);
 	}
 	
 	return null;
 }
 
-// Function to get first valid account file
+// Function to get first valid account file with folder scan
 function getFirstValidAccountFile() {
-	const validAccounts = refreshValidAccounts();
+	log.info("ACCOUNT INIT", "🔍 Initial scan of appstate folder...");
+	const validAccounts = scanAppstateFolder();
 	
 	if (validAccounts.length === 0) {
-		log.error("APPSTATE", "No valid account files found! Please add valid cookie data in account files (account1.txt, account2.txt, etc.) in the appstate folder.");
+		log.error("APPSTATE", "❌ No valid account files found! Please add valid cookie data in account files (account1.txt, account2.txt, etc.) in the appstate folder.");
 		return null;
 	}
+	
+	// Clear dead accounts set
+	deadAccounts.clear();
 	
 	global.GoatBot.accountFiles = validAccounts;
 	global.GoatBot.currentAccountIndex = 0;
 	global.GoatBot.activeAccountFile = validAccounts[0];
 	
-	log.info("APPSTATE", `Found ${validAccounts.length} valid account file(s): ${validAccounts.join(', ')}`);
-	log.info("APPSTATE", `Using account file: ${global.GoatBot.activeAccountFile} (1/${validAccounts.length})`);
+	log.info("APPSTATE", `📁 Found ${validAccounts.length} valid account file(s): ${validAccounts.join(', ')}`);
+	log.info("APPSTATE", `✅ Using account file: ${global.GoatBot.activeAccountFile} (1/${validAccounts.length})`);
 	
 	return path.normalize(`${appstateDir}/${validAccounts[0]}`);
 }
 
-// Function to switch account on error
-async function switchToNextAccountOnError(error, loginWithEmail = false) {
-	log.error("ACCOUNT ERROR", `Failed with account: ${global.GoatBot.activeAccountFile}`);
-	if (error) {
-		log.error("ERROR DETAILS", error.message || error);
+// Function to mark current account as dead
+function markCurrentAccountAsDead() {
+	if (global.GoatBot.activeAccountFile) {
+		deadAccounts.add(global.GoatBot.activeAccountFile);
+		const remainingValid = global.GoatBot.accountFiles.length - deadAccounts.size;
+		log.warn("ACCOUNT DEAD", `⚠️ Marked ${global.GoatBot.activeAccountFile} as dead. Remaining valid accounts: ${remainingValid}`);
+		
+		// Optionally rename the dead account file
+		try {
+			const deadPath = path.normalize(`${appstateDir}/dead_${global.GoatBot.activeAccountFile}`);
+			const currentPath = path.normalize(`${appstateDir}/${global.GoatBot.activeAccountFile}`);
+			if (fs.existsSync(currentPath)) {
+				fs.renameSync(currentPath, deadPath);
+				log.info("ACCOUNT DEAD", `📁 Renamed ${global.GoatBot.activeAccountFile} to dead_${global.GoatBot.activeAccountFile}`);
+			}
+		} catch (err) {
+			// Ignore rename errors
+		}
 	}
+}
+
+// Function to switch account by scanning folder
+async function switchToNextAccountByFolderScan(loginWithEmail = false) {
+	log.error("ACCOUNT ERROR", `❌ Failed with account: ${global.GoatBot.activeAccountFile}`);
 	
 	// Don't switch if we're in email login mode
 	if (loginWithEmail) {
@@ -372,32 +431,69 @@ async function switchToNextAccountOnError(error, loginWithEmail = false) {
 		return false;
 	}
 	
-	const nextAccountPath = getNextAccountFile();
+	// Mark current account as dead
+	markCurrentAccountAsDead();
+	
+	// Scan folder for next valid account
+	const nextAccountPath = getNextValidAccountFromFolder();
 	
 	if (nextAccountPath) {
-		log.warn("ACCOUNT SWITCH", `Switching to next account: ${global.GoatBot.activeAccountFile}`);
+		log.warn("ACCOUNT SWITCH", `🔄 Switching to next account: ${global.GoatBot.activeAccountFile}`);
 		global.client.dirAccount = nextAccountPath;
 		
-		// Update the account file content
+		// Update the account file content in main account.txt
 		try {
 			const accountContent = fs.readFileSync(nextAccountPath, 'utf8');
 			fs.writeFileSync(dirAccount, accountContent);
+			log.success("ACCOUNT SWITCH", `✅ Successfully switched to ${global.GoatBot.activeAccountFile}`);
 		} catch (err) {
 			log.error("ACCOUNT SWITCH", "Failed to update account file", err);
 		}
 		
 		// Wait a bit before retrying
-		log.info("RETRY LOGIN", "Waiting 5 seconds before retrying with new account...");
+		log.info("RETRY LOGIN", "⏳ Waiting 5 seconds before retrying with new account...");
 		await sleep(5000);
 		
 		return true;
 	} else {
-		log.error("ACCOUNT ERROR", "No more accounts available to try!");
+		log.error("ACCOUNT ERROR", "❌ No valid accounts found in appstate folder!");
+		
+		// Check if there are any account files at all
+		try {
+			const allFiles = fs.readdirSync(appstateDir);
+			const accountFiles = allFiles.filter(f => f.startsWith('account') && f.endsWith('.txt'));
+			
+			if (accountFiles.length === 0) {
+				log.error("ACCOUNT ERROR", "📁 No account files found in appstate folder!");
+				log.info("ACCOUNT FIX", "Please create account1.txt, account2.txt etc. in appstate folder with valid cookies");
+			} else {
+				log.error("ACCOUNT ERROR", `📁 Found ${accountFiles.length} account files but all are invalid/dead.`);
+				log.info("ACCOUNT FIX", "Please add valid cookies to account files or delete dead_ files.");
+			}
+		} catch (err) {}
+		
 		return false;
 	}
 }
 
-// ==================== END MULTI-ACCOUNT SUPPORT FUNCTIONS ====================
+// Function to get account status summary
+function getAccountStatus() {
+	const valid = global.GoatBot.accountFiles || [];
+	const dead = Array.from(deadAccounts);
+	const remainingValid = valid.filter(f => !deadAccounts.has(f)).length;
+	
+	return {
+		current: global.GoatBot.activeAccountFile,
+		currentIndex: global.GoatBot.currentAccountIndex + 1,
+		totalValid: valid.length,
+		totalDead: dead.length,
+		remainingValid: remainingValid,
+		validAccounts: valid,
+		deadAccounts: dead
+	};
+}
+
+// ==================== END MULTI-ACCOUNT AUTO-SWITCH SYSTEM ====================
 
 // Initialize with first valid account
 const firstValidAccount = getFirstValidAccountFile();
@@ -570,232 +666,259 @@ function pushI_user(appState, value) {
 let spin;
 async function getAppStateToLogin(loginWithEmail) {
 	let appState = [];
+	let maxRetries = global.GoatBot.accountFiles ? global.GoatBot.accountFiles.length * 2 : 3;
+	let retryCount = 0;
 	
-	// Check if we have multiple accounts to try
-	if (!loginWithEmail && global.GoatBot.accountFiles && global.GoatBot.accountFiles.length > 0) {
-		log.info("ACCOUNT SELECTION", `Trying account ${global.GoatBot.currentAccountIndex + 1}/${global.GoatBot.accountFiles.length}: ${global.GoatBot.activeAccountFile}`);
-	}
-	
-	if (loginWithEmail)
-		return await getAppStateFromEmail(undefined, facebookAccount);
-	if (!existsSync(dirAccount))
-		return log.error("LOGIN FACEBOOK", getText('login', 'notFoundDirAccount', colors.green(dirAccount)));
-	const accountText = readFileSync(dirAccount, "utf8");
-
-	try {
-		const splitAccountText = accountText.replace(/\|/g, '\n').split('\n').map(i => i.trim()).filter(i => i);
-		// is token full permission
-		if (accountText.startsWith('EAAAA')) {
-			try {
-				spin = createOraDots(getText('login', 'loginToken'));
-				spin._start();
-				appState = await require('./getFbstate.js')(accountText);
+	while (retryCount < maxRetries) {
+		try {
+			// Check if we have multiple accounts to try
+			if (!loginWithEmail && global.GoatBot.accountFiles && global.GoatBot.accountFiles.length > 0) {
+				log.info("ACCOUNT SELECTION", `Trying account ${global.GoatBot.currentAccountIndex + 1}/${global.GoatBot.accountFiles.length}: ${global.GoatBot.activeAccountFile}`);
 			}
-			catch (err) {
-				err.name = "TOKEN_ERROR";
+			
+			if (loginWithEmail)
+				return await getAppStateFromEmail(undefined, facebookAccount);
+			if (!existsSync(dirAccount))
+				return log.error("LOGIN FACEBOOK", getText('login', 'notFoundDirAccount', colors.green(dirAccount)));
+			const accountText = readFileSync(dirAccount, "utf8");
+
+			try {
+				const splitAccountText = accountText.replace(/\|/g, '\n').split('\n').map(i => i.trim()).filter(i => i);
+				// is token full permission
+				if (accountText.startsWith('EAAAA')) {
+					try {
+						spin = createOraDots(getText('login', 'loginToken'));
+						spin._start();
+						appState = await require('./getFbstate.js')(accountText);
+					}
+					catch (err) {
+						err.name = "TOKEN_ERROR";
+						throw err;
+					}
+				}
+				// is cookie string
+				else {
+					if (accountText.match(/^(?:\s*\w+\s*=\s*[^;]*;?)+/)) {
+						spin = createOraDots(getText('login', 'loginCookieString'));
+						spin._start();
+						appState = accountText.split(';')
+							.map(i => {
+								const [key, value] = i.split('=');
+								return {
+									key: (key || "").trim(),
+									value: (value || "").trim(),
+									domain: "facebook.com",
+									path: "/",
+									hostOnly: true,
+									creation: new Date().toISOString(),
+									lastAccessed: new Date().toISOString()
+								};
+							})
+							.filter(i => i.key && i.value && i.key != "x-referer");
+					}
+					// is netscape cookie
+					else if (isNetScapeCookie(accountText)) {
+						spin = createOraDots(getText('login', 'loginCookieNetscape'));
+						spin._start();
+						appState = netScapeToCookies(accountText);
+					}
+					else if (
+						(splitAccountText.length == 2 || splitAccountText.length == 3) &&
+						!splitAccountText.slice(0, 2).map(i => i.trim()).some(i => i.includes(' '))
+					) {
+						// bug if account.txt is "[]"
+						global.GoatBot.config.facebookAccount.email = splitAccountText[0];
+						global.GoatBot.config.facebookAccount.password = splitAccountText[1];
+						if (splitAccountText[2]) {
+							const code2FATemp = splitAccountText[2].replace(/ /g, "");
+							global.GoatBot.config.facebookAccount['2FASecret'] = code2FATemp;
+						}
+						writeFileSync(global.client.dirConfig, JSON.stringify(global.GoatBot.config, null, 2));
+					}
+					// is json (cookies or appstate)
+					else {
+						try {
+							spin = createOraDots(getText('login', 'loginCookieArray'));
+							spin._start();
+							appState = JSON.parse(accountText);
+						}
+						catch (err) {
+							const error = new Error(`${path.basename(dirAccount)} is invalid`);
+							error.name = "ACCOUNT_ERROR";
+							throw error;
+						}
+						if (appState.some(i => i.name))
+							appState = appState.map(i => {
+								i.key = i.name;
+								delete i.name;
+								return i;
+							});
+						else if (!appState.some(i => i.key)) {
+							const error = new Error(`${path.basename(dirAccount)} is invalid`);
+							error.name = "ACCOUNT_ERROR";
+							throw error;
+						}
+						appState = appState
+							.map(item => ({
+								...item,
+								domain: "facebook.com",
+								path: "/",
+								hostOnly: false,
+								creation: new Date().toISOString(),
+								lastAccessed: new Date().toISOString()
+							}))
+							.filter(i => i.key && i.value && i.key != "x-referer");
+					}
+					
+					// Check if cookie is live
+					if (!await checkLiveCookie(appState.map(i => i.key + "=" + i.value).join("; "), facebookAccount.userAgent)) {
+						const error = new Error("Cookie is invalid");
+						error.name = "COOKIE_INVALID";
+						throw error;
+					}
+				}
+				
+				// If we got here, success!
+				spin && spin._stop();
+				return appState;
+				
+			} catch (err) {
+				spin && spin._stop();
+				
+				// Handle account switching on error by scanning folder
+				if (err.name === "TOKEN_ERROR" || err.name === "COOKIE_INVALID" || err.name === "ACCOUNT_ERROR") {
+					log.error("ACCOUNT ERROR", `Failed with account ${global.GoatBot.activeAccountFile}: ${err.message}`);
+					
+					// Try next account by scanning folder
+					const switchSuccess = await switchToNextAccountByFolderScan(loginWithEmail);
+					if (switchSuccess) {
+						retryCount++;
+						log.info("RETRY LOGIN", `Retry ${retryCount}/${maxRetries} with account: ${global.GoatBot.activeAccountFile}`);
+						continue;
+					} else {
+						log.error("ACCOUNT ERROR", "All accounts failed! Please check your appstate files.");
+						process.exit(1);
+					}
+				}
+				
+				// If it's not an account error, rethrow
 				throw err;
 			}
-		}
-		// is cookie string
-		else {
-			if (accountText.match(/^(?:\s*\w+\s*=\s*[^;]*;?)+/)) {
-				spin = createOraDots(getText('login', 'loginCookieString'));
-				spin._start();
-				appState = accountText.split(';')
-					.map(i => {
-						const [key, value] = i.split('=');
-						return {
-							key: (key || "").trim(),
-							value: (value || "").trim(),
-							domain: "facebook.com",
-							path: "/",
-							hostOnly: true,
-							creation: new Date().toISOString(),
-							lastAccessed: new Date().toISOString()
-						};
-					})
-					.filter(i => i.key && i.value && i.key != "x-referer");
-			}
-			// is netscape cookie
-			else if (isNetScapeCookie(accountText)) {
-				spin = createOraDots(getText('login', 'loginCookieNetscape'));
-				spin._start();
-				appState = netScapeToCookies(accountText);
-			}
-			else if (
-				(splitAccountText.length == 2 || splitAccountText.length == 3) &&
-				!splitAccountText.slice(0, 2).map(i => i.trim()).some(i => i.includes(' '))
-			) {
-				// bug if account.txt is "[]"
-				global.GoatBot.config.facebookAccount.email = splitAccountText[0]; // bug here=> email is "["
-				global.GoatBot.config.facebookAccount.password = splitAccountText[1]; // bug here=> password is "]"
-				if (splitAccountText[2]) {
-					const code2FATemp = splitAccountText[2].replace(/ /g, "");
-					global.GoatBot.config.facebookAccount['2FASecret'] = code2FATemp;
-				}
-				writeFileSync(global.client.dirConfig, JSON.stringify(global.GoatBot.config, null, 2));
-			}
-			// is json (cookies or appstate)
-			else {
-				try {
-					spin = createOraDots(getText('login', 'loginCookieArray'));
-					spin._start();
-					appState = JSON.parse(accountText);
-				}
-				catch (err) {
-					const error = new Error(`${path.basename(dirAccount)} is invalid`);
-					error.name = "ACCOUNT_ERROR";
-					throw error;
-				}
-				if (appState.some(i => i.name))
-					appState = appState.map(i => {
-						i.key = i.name;
-						delete i.name;
-						return i;
-					});
-				else if (!appState.some(i => i.key)) {
-					const error = new Error(`${path.basename(dirAccount)} is invalid`);
-					error.name = "ACCOUNT_ERROR";
-					throw error;
-				}
-				appState = appState
-					.map(item => ({
-						...item,
-						domain: "facebook.com",
-						path: "/",
-						hostOnly: false,
-						creation: new Date().toISOString(),
-						lastAccessed: new Date().toISOString()
-					}))
-					.filter(i => i.key && i.value && i.key != "x-referer");
-			}
-			if (!await checkLiveCookie(appState.map(i => i.key + "=" + i.value).join("; "), facebookAccount.userAgent)) {
-				const error = new Error("Cookie is invalid");
-				error.name = "COOKIE_INVALID";
-				throw error;
-			}
-		}
-	}
-	catch (err) {
-		spin && spin._stop();
-		
-		// Handle account switching on error
-		if (err.name === "TOKEN_ERROR" || err.name === "COOKIE_INVALID" || err.name === "ACCOUNT_ERROR") {
-			log.error("ACCOUNT ERROR", `Failed with account ${global.GoatBot.activeAccountFile}: ${err.message}`);
+		} catch (err) {
+			// Handle non-account errors
+			log.error("LOGIN ERROR", err);
 			
-			// Try next account
-			const switchSuccess = await switchToNextAccountOnError(err);
-			if (switchSuccess) {
-				log.info("RETRY LOGIN", `Retrying with account: ${global.GoatBot.activeAccountFile}`);
-				return await getAppStateToLogin(loginWithEmail);
-			} else {
-				log.error("ACCOUNT ERROR", "All accounts failed! Please check your appstate files.");
-				process.exit(1);
+			// If we have more retries, try next account
+			if (retryCount < maxRetries - 1) {
+				retryCount++;
+				log.info("RETRY LOGIN", `Unexpected error, retry ${retryCount}/${maxRetries} with next account`);
+				await switchToNextAccountByFolderScan(loginWithEmail);
+				continue;
 			}
-		}
-		
-		let {
-			email,
-			password
-		} = facebookAccount;
-		if (err.name === "TOKEN_ERROR")
-			log.err("LOGIN FACEBOOK", getText('login', 'tokenError', colors.green("EAAAA..."), colors.green(dirAccount)));
-		else if (err.name === "COOKIE_INVALID")
-			log.err("LOGIN FACEBOOK", getText('login', 'cookieError'));
+			
+			// No more retries
+			let {
+				email,
+				password
+			} = facebookAccount;
+			
+			if (!email || !password) {
+				log.warn("LOGIN FACEBOOK", getText('login', 'cannotFindAccount'));
+				const rl = readline.createInterface({
+					input: process.stdin,
+					output: process.stdout
+				});
+				const options = [
+					getText('login', 'chooseAccount'),
+					getText('login', 'chooseToken'),
+					getText('login', 'chooseCookieString'),
+					getText('login', 'chooseCookieArray')
+				];
+				let currentOption = 0;
+				await new Promise((resolve) => {
+					const character = '>';
+					function showOptions() {
+						rl.output.write(`\r${options.map((option, index) => index === currentOption ? colors.blueBright(`${character} (${index + 1}) ${option}`) : `  (${index + 1}) ${option}`).join('\n')}\u001B`);
+						rl.write('\u001B[?25l'); // hides cursor
+					}
+					rl.input.on('keypress', (_, key) => {
+						if (key.name === 'up') {
+							currentOption = (currentOption - 1 + options.length) % options.length;
+						}
+						else if (key.name === 'down') {
+							currentOption = (currentOption + 1) % options.length;
+						}
+						else if (!isNaN(key.name)) {
+							const number = parseInt(key.name);
+							if (number >= 0 && number <= options.length)
+								currentOption = number - 1;
+							process.stdout.write('\033[1D'); // delete the character
+						}
+						else if (key.name === 'enter' || key.name === 'return') {
+							rl.input.removeAllListeners('keypress');
+							rl.close();
+							clearLines(options.length + 1);
+							showOptions();
+							resolve();
+						}
+						else {
+							process.stdout.write('\033[1D'); // delete the character
+						}
 
-		if (!email || !password) {
-			log.warn("LOGIN FACEBOOK", getText('login', 'cannotFindAccount'));
-			const rl = readline.createInterface({
-				input: process.stdin,
-				output: process.stdout
-			});
-			const options = [
-				getText('login', 'chooseAccount'),
-				getText('login', 'chooseToken'),
-				getText('login', 'chooseCookieString'),
-				getText('login', 'chooseCookieArray')
-			];
-			let currentOption = 0;
-			await new Promise((resolve) => {
-				const character = '>';
-				function showOptions() {
-					rl.output.write(`\r${options.map((option, index) => index === currentOption ? colors.blueBright(`${character} (${index + 1}) ${option}`) : `  (${index + 1}) ${option}`).join('\n')}\u001B`);
-					rl.write('\u001B[?25l'); // hides cursor
-				}
-				rl.input.on('keypress', (_, key) => {
-					if (key.name === 'up') {
-						currentOption = (currentOption - 1 + options.length) % options.length;
-					}
-					else if (key.name === 'down') {
-						currentOption = (currentOption + 1) % options.length;
-					}
-					else if (!isNaN(key.name)) {
-						const number = parseInt(key.name);
-						if (number >= 0 && number <= options.length)
-							currentOption = number - 1;
-						process.stdout.write('\033[1D'); // delete the character
-					}
-					else if (key.name === 'enter' || key.name === 'return') {
-						rl.input.removeAllListeners('keypress');
-						rl.close();
-						clearLines(options.length + 1);
+						clearLines(options.length);
 						showOptions();
-						resolve();
-					}
-					else {
-						process.stdout.write('\033[1D'); // delete the character
-					}
-
-					clearLines(options.length);
+					});
 					showOptions();
 				});
-				showOptions();
-			});
 
-			rl.write('\u001B[?25h\n'); // show cursor 
-			clearLines(options.length + 1);
-			log.info("LOGIN FACEBOOK", getText('login', 'loginWith', options[currentOption]));
+				rl.write('\u001B[?25h\n'); // show cursor 
+				clearLines(options.length + 1);
+				log.info("LOGIN FACEBOOK", getText('login', 'loginWith', options[currentOption]));
 
-			if (currentOption == 0) {
-				email = await input(`${getText('login', 'inputEmail')} `);
-				password = await input(`${getText('login', 'inputPassword')} `, true);
-				const twoFactorAuth = await input(`${getText('login', 'input2FA')} `);
-				facebookAccount.email = email || '';
-				facebookAccount.password = password || '';
-				facebookAccount['2FASecret'] = twoFactorAuth || '';
-				writeFileSync(global.client.dirConfig, JSON.stringify(global.GoatBot.config, null, 2));
+				if (currentOption == 0) {
+					email = await input(`${getText('login', 'inputEmail')} `);
+					password = await input(`${getText('login', 'inputPassword')} `, true);
+					const twoFactorAuth = await input(`${getText('login', 'input2FA')} `);
+					facebookAccount.email = email || '';
+					facebookAccount.password = password || '';
+					facebookAccount['2FASecret'] = twoFactorAuth || '';
+					writeFileSync(global.client.dirConfig, JSON.stringify(global.GoatBot.config, null, 2));
+				}
+				else if (currentOption == 1) {
+					const token = await input(getText('login', 'inputToken') + " ");
+					writeFileSync(global.client.dirAccount, token);
+				}
+				else if (currentOption == 2) {
+					const cookie = await input(getText('login', 'inputCookieString') + " ");
+					writeFileSync(global.client.dirAccount, cookie);
+				}
+				else {
+					const cookie = await input(getText('login', 'inputCookieArray') + " ");
+					writeFileSync(global.client.dirAccount, JSON.stringify(JSON.parse(cookie), null, 2));
+				}
+				return await getAppStateToLogin();
 			}
-			else if (currentOption == 1) {
-				const token = await input(getText('login', 'inputToken') + " ");
-				writeFileSync(global.client.dirAccount, token);
-			}
-			else if (currentOption == 2) {
-				const cookie = await input(getText('login', 'inputCookieString') + " ");
-				writeFileSync(global.client.dirAccount, cookie);
-			}
-			else {
-				const cookie = await input(getText('login', 'inputCookieArray') + " ");
-				writeFileSync(global.client.dirAccount, JSON.stringify(JSON.parse(cookie), null, 2));
-			}
-			return await getAppStateToLogin();
-		}
 
-		log.info("LOGIN FACEBOOK", getText('login', 'loginPassword'));
-		log.info("ACCOUNT INFO", `Email: ${facebookAccount.email}, I_User: ${facebookAccount.i_user || "(empty)"}`);
-		spin = createOraDots(getText('login', 'loginPassword'));
-		spin._start();
+			log.info("LOGIN FACEBOOK", getText('login', 'loginPassword'));
+			log.info("ACCOUNT INFO", `Email: ${facebookAccount.email}, I_User: ${facebookAccount.i_user || "(empty)"}`);
+			spin = createOraDots(getText('login', 'loginPassword'));
+			spin._start();
 
-		try {
-			appState = await getAppStateFromEmail(spin, facebookAccount);
-			spin._stop();
-		}
-		catch (err) {
-			spin._stop();
-			log.err("LOGIN FACEBOOK", getText('login', 'loginError'), err.message, err);
-			process.exit();
+			try {
+				appState = await getAppStateFromEmail(spin, facebookAccount);
+				spin._stop();
+				return appState;
+			}
+			catch (err) {
+				spin._stop();
+				log.err("LOGIN FACEBOOK", getText('login', 'loginError'), err.message, err);
+				process.exit();
+			}
 		}
 	}
-	return appState;
+	
+	log.error("LOGIN FAILED", `Maximum retry attempts (${maxRetries}) reached. Exiting...`);
+	process.exit(1);
 }
 
 function stopListening(keyListen) {
@@ -832,8 +955,8 @@ async function startBot(loginWithEmail) {
 	if (!appState || appState.length === 0) {
 		log.error("LOGIN ERROR", "Failed to get appstate");
 		
-		// Try next account
-		const switchSuccess = await switchToNextAccountOnError(new Error("Empty appstate"), loginWithEmail);
+		// Try next account by scanning folder
+		const switchSuccess = await switchToNextAccountByFolderScan(loginWithEmail);
 		if (switchSuccess) {
 			log.info("RETRY LOGIN", `Retrying with account: ${global.GoatBot.activeAccountFile}`);
 			return await startBot(loginWithEmail);
@@ -898,34 +1021,75 @@ async function startBot(loginWithEmail) {
 				log.err("LOGIN FACEBOOK", getText('login', 'loginError'), error);
 				global.statusAccountBot = 'can\'t login';
 				
-				// Try next account on login error
+				// ============ AUTO-SWITCH WITH FOLDER SCAN ============
 				if (!loginWithEmail) {
-					(async () => {
-						const switchSuccess = await switchToNextAccountOnError(error, loginWithEmail);
-						if (switchSuccess) {
-							log.info("RETRY LOGIN", `Restarting with account: ${global.GoatBot.activeAccountFile}`);
-							setTimeout(() => startBot(false), 5000);
-							return;
-						} else {
-							log.error("ACCOUNT ERROR", "No more accounts available to try!");
-							
-							// —————————— CHECK DASHBOARD —————————— //
-							if (global.GoatBot.config.dashBoard?.enable == true) {
-								try {
-									await require("../../dashboard/app.js")(null);
-									log.info("DASHBOARD", getText('login', 'openDashboardSuccess'));
-								}
-								catch (err) {
-									log.err("DASHBOARD", getText('login', 'openDashboardError'), err);
-								}
-								return;
-							}
-							else {
-								process.exit(1);
-							}
+					// Mark current as dead
+					markCurrentAccountAsDead();
+					
+					// Scan folder for next valid account
+					log.info("ACCOUNT CHECK", "🔍 Scanning appstate folder for valid cookies...");
+					
+					// Force refresh the valid accounts list
+					refreshValidAccounts();
+					
+					// Try to get next valid account by scanning folder
+					const nextAccountPath = getNextValidAccountFromFolder();
+					
+					if (nextAccountPath) {
+						log.warn("ACCOUNT SWITCH", `🔄 Found new account: ${global.GoatBot.activeAccountFile}`);
+						global.client.dirAccount = nextAccountPath;
+						
+						// Update the main account file
+						try {
+							const accountContent = fs.readFileSync(nextAccountPath, 'utf8');
+							fs.writeFileSync(dirAccount, accountContent);
+							log.success("ACCOUNT SWITCH", `✅ Successfully switched to ${global.GoatBot.activeAccountFile}`);
+						} catch (err) {
+							log.error("ACCOUNT SWITCH", "Failed to update account file", err);
 						}
-					})();
-					return;
+						
+						log.info("RESTARTING", "🔄 Restarting bot with new account in 3 seconds...");
+						setTimeout(() => {
+							process.exit(2); // Restart to use new account
+						}, 3000);
+						return;
+					} else {
+						// No valid accounts found, check if any accounts were previously dead
+						log.error("ACCOUNT ERROR", "❌ No valid accounts found in appstate folder!");
+						
+						// Check if there are any account files at all
+						try {
+							const allFiles = fs.readdirSync(appstateDir);
+							const accountFiles = allFiles.filter(f => f.startsWith('account') && f.endsWith('.txt'));
+							
+							if (accountFiles.length === 0) {
+								log.error("ACCOUNT ERROR", "📁 No account files found in appstate folder!");
+								log.info("ACCOUNT FIX", "Please create account1.txt, account2.txt etc. in appstate folder with valid cookies");
+							} else {
+								log.error("ACCOUNT ERROR", `📁 Found ${accountFiles.length} account files but all are invalid/dead.`);
+								log.info("ACCOUNT FIX", "Please add valid cookies to account files or delete dead_ files.");
+							}
+						} catch (err) {}
+						
+						// Show account status
+						const status = getAccountStatus();
+						log.error("ACCOUNT STATUS", `Current: ${status.current}, Total valid: ${status.totalValid}, Dead: ${status.totalDead}`);
+						
+						// —————————— CHECK DASHBOARD —————————— //
+						if (global.GoatBot.config.dashBoard?.enable == true) {
+							try {
+								await require("../../dashboard/app.js")(null);
+								log.info("DASHBOARD", getText('login', 'openDashboardSuccess'));
+							}
+							catch (err) {
+								log.err("DASHBOARD", getText('login', 'openDashboardError'), err);
+							}
+							return;
+						}
+						else {
+							process.exit(1);
+						}
+					}
 				}
 				
 				if (facebookAccount.email && facebookAccount.password) {
@@ -950,7 +1114,11 @@ async function startBot(loginWithEmail) {
 			global.GoatBot.fcaApi = api;
 			global.GoatBot.botID = api.getCurrentUserID();
 			log.info("LOGIN FACEBOOK", getText('login', 'loginSuccess'));
-			log.info("ACTIVE ACCOUNT", `Successfully logged in with: ${global.GoatBot.activeAccountFile} (${global.GoatBot.currentAccountIndex + 1}/${global.GoatBot.accountFiles.length})`);
+			
+			// Show account status
+			const status = getAccountStatus();
+			log.info("ACTIVE ACCOUNT", `✅ Successfully logged in with: ${global.GoatBot.activeAccountFile} (${global.GoatBot.currentAccountIndex + 1}/${global.GoatBot.accountFiles.length})`);
+			log.info("ACCOUNT STATUS", `📊 ${status.remainingValid} valid accounts remaining (${status.totalDead} dead)`);
 			
 			let hasBanned = false;
 			global.botID = api.getCurrentUserID();
@@ -963,7 +1131,7 @@ async function startBot(loginWithEmail) {
 			log.info("BOT NICK NAME", global.GoatBot.config.nickNameBot || "GOAT BOT");
 			log.info("ACCOUNT FILE", `${global.GoatBot.activeAccountFile} (${global.GoatBot.currentAccountIndex + 1}/${global.GoatBot.accountFiles.length})`);
 			if (global.GoatBot.accountFiles.length > 1) {
-				log.info("BACKUP ACCOUNTS", `${global.GoatBot.accountFiles.length - 1} backup account(s) available`);
+				log.info("BACKUP ACCOUNTS", `📁 ${global.GoatBot.accountFiles.length - 1 - status.totalDead} backup account(s) available in appstate folder`);
 			}
 			// ———————————————————— GBAN ————————————————————— //
 			let dataGban;
@@ -1132,7 +1300,6 @@ async function startBot(loginWithEmail) {
 			log.master("LOAD TIME", `${convertTime(Date.now() - global.GoatBot.startTime)}`);
 			logColor("#f5ab00", createLine("COPYRIGHT"));
 			// —————————————————— COPYRIGHT INFO —————————————————— //
-			// console.log(`\x1b[1m\x1b[33mCOPYRIGHT:\x1b[0m\x1b[1m\x1b[37m \x1b[0m\x1b[1m\x1b[36mProject GoatBot v2 created by ntkhang03 (https://github.com/ntkhang03), please do not sell this source code or claim it as your own. Thank you!\x1b[0m`);
 			console.log(`\x1b[1m\x1b[33m${("COPYRIGHT:")}\x1b[0m\x1b[1m\x1b[37m \x1b[0m\x1b[1m\x1b[36m${("Project GoatBot v2 created by ntkhang03 (https://github.com/ntkhang03), please do not sell this source code or claim it as your own. Thank you!")}\x1b[0m`);
 			logColor("#f5ab00", character);
 			global.GoatBot.config.adminBot = adminBot;
@@ -1151,19 +1318,60 @@ async function startBot(loginWithEmail) {
 						error.error == "Not logged in." ||
 						error.error == "Connection refused: Server unavailable"
 					) {
-						log.err("NOT LOGGEG IN", getText('login', 'notLoggedIn'), error);
+						log.err("NOT LOGGED IN", getText('login', 'notLoggedIn'), error);
 						global.responseUptimeCurrent = responseUptimeError;
 						global.statusAccountBot = 'can\'t login';
 						
-						// Try to switch account on login error
+						// ============ AUTO-SWITCH WITH FOLDER SCAN ON LISTEN ERROR ============
 						if (!loginWithEmail) {
-							const switchSuccess = await switchToNextAccountOnError(error, loginWithEmail);
-							if (switchSuccess) {
-								log.warn("ACCOUNT SWITCH", `Switching to next account: ${global.GoatBot.activeAccountFile}`);
+							// Mark current as dead
+							markCurrentAccountAsDead();
+							
+							// Scan folder for next valid account
+							log.info("ACCOUNT CHECK", "🔍 Scanning appstate folder for valid cookies...");
+							
+							// Force refresh the valid accounts list
+							refreshValidAccounts();
+							
+							// Try to get next valid account by scanning folder
+							const nextAccountPath = getNextValidAccountFromFolder();
+							
+							if (nextAccountPath) {
+								log.warn("ACCOUNT SWITCH", `🔄 Found new account: ${global.GoatBot.activeAccountFile}`);
+								global.client.dirAccount = nextAccountPath;
+								
+								// Update the main account file
+								try {
+									const accountContent = fs.readFileSync(nextAccountPath, 'utf8');
+									fs.writeFileSync(dirAccount, accountContent);
+									log.success("ACCOUNT SWITCH", `✅ Successfully switched to ${global.GoatBot.activeAccountFile}`);
+								} catch (err) {
+									log.error("ACCOUNT SWITCH", "Failed to update account file", err);
+								}
+								
+								log.info("RESTARTING", "🔄 Restarting bot with new account in 3 seconds...");
 								setTimeout(() => {
 									process.exit(2); // Restart to use new account
-								}, 5000);
+								}, 3000);
 								return;
+							} else {
+								log.error("ACCOUNT ERROR", "❌ No valid accounts found in appstate folder!");
+								
+								// Check if there are any account files at all
+								try {
+									const allFiles = fs.readdirSync(appstateDir);
+									const accountFiles = allFiles.filter(f => f.startsWith('account') && f.endsWith('.txt'));
+									
+									if (accountFiles.length === 0) {
+										log.error("ACCOUNT ERROR", "📁 No account files found in appstate folder!");
+									} else {
+										log.error("ACCOUNT ERROR", `📁 Found ${accountFiles.length} account files but all are invalid/dead.`);
+									}
+								} catch (err) {}
+								
+								// Show account status
+								const status = getAccountStatus();
+								log.error("ACCOUNT STATUS", `Current: ${status.current}, Total valid: ${status.totalValid}, Dead: ${status.totalDead}`);
 							}
 						}
 						
@@ -1384,4 +1592,5 @@ async function startBot(loginWithEmail) {
 }
 
 global.GoatBot.reLoginBot = startBot;
+global.GoatBot.getAccountStatus = getAccountStatus;
 startBot();
